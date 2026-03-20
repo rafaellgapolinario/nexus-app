@@ -7,19 +7,13 @@ export async function POST(req: NextRequest) {
   try {
     const { googleId, nome, email, avatar } = await req.json()
     if (!googleId || !email) return NextResponse.json({ error: 'Missing fields' }, { status: 400 })
-
-    // Upsert user in Supabase
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) return NextResponse.json({ error: 'Supabase not configured' }, { status: 500 })
     const user = await upsertUser({ google_id: googleId, nome, email, avatar })
-
-    // Create default settings if not exists
     await upsertSettings(user.id, {})
-
-    // Log activity
-    await addActivityLog(user.id, 'login', { email })
-
+    await addActivityLog(user.id, `Login: ${email}`)
     return NextResponse.json({ user })
   } catch (err) {
     console.error('Auth error:', err)
-    return NextResponse.json({ error: 'Auth failed' }, { status: 500 })
+    return NextResponse.json({ error: String(err) }, { status: 500 })
   }
 }
