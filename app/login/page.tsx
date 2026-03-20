@@ -9,11 +9,7 @@ import { Toast } from '@/components/Toast'
 const CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || ''
 const SCOPES    = 'https://www.googleapis.com/auth/calendar openid email profile'
 
-declare global {
-  interface Window {
-    google: any
-  }
-}
+declare global { interface Window { google: any } }
 
 export default function LoginPage() {
   const { lang, accessToken, setAuth, showToast } = useStore(s => ({
@@ -21,27 +17,20 @@ export default function LoginPage() {
   }))
   const router = useRouter()
 
-  // Already logged in → go home
-  useEffect(() => {
-    if (accessToken) router.replace('/')
-  }, [accessToken, router])
+  useEffect(() => { if (accessToken) router.replace('/') }, [accessToken, router])
 
   useEffect(() => {
     const script = document.createElement('script')
     script.src = 'https://accounts.google.com/gsi/client'
-    script.async = true
-    script.defer = true
+    script.async = true; script.defer = true
     document.head.appendChild(script)
-    return () => {
-      if (document.head.contains(script)) document.head.removeChild(script)
-    }
+    return () => { if (document.head.contains(script)) document.head.removeChild(script) }
   }, [])
 
   async function startLogin() {
     if (!window.google) { showToast('Aguarde...'); setTimeout(startLogin, 1000); return }
     window.google.accounts.oauth2.initTokenClient({
-      client_id: CLIENT_ID,
-      scope: SCOPES,
+      client_id: CLIENT_ID, scope: SCOPES,
       callback: async (resp: any) => {
         if (resp.error) { showToast('Erro: ' + resp.error); return }
         try {
@@ -49,6 +38,19 @@ export default function LoginPage() {
             headers: { Authorization: `Bearer ${resp.access_token}` }
           })
           const profile = await profileRes.json()
+
+          // Save to Supabase
+          await fetch('/api/auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              googleId: profile.sub,
+              nome: profile.name,
+              email: profile.email,
+              avatar: profile.picture,
+            }),
+          })
+
           setAuth(resp.access_token, profile)
           showToast(t(lang, 'logged_in'))
           router.replace('/')
@@ -60,13 +62,12 @@ export default function LoginPage() {
   return (
     <>
       <div style={{ display: 'flex', height: '100dvh', background: 'var(--bg)' }}>
-        {/* Left panel */}
+        {/* Left */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 48, position: 'relative', overflow: 'hidden' }}>
           <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(ellipse 60% 50% at 50% 30%,rgba(124,109,250,0.2) 0%,transparent 70%)', pointerEvents: 'none' }} />
           <div style={{ marginBottom: 20 }}><NexusIcon size={80} /></div>
           <div style={{ fontFamily: 'Syne', fontSize: 48, fontWeight: 800, letterSpacing: -2, marginBottom: 8 }}>Nexus</div>
           <div style={{ fontSize: 16, color: 'var(--text2)', maxWidth: 360, textAlign: 'center', lineHeight: 1.6 }}>{t(lang, 'login_tagline')}</div>
-
           <div style={{ marginTop: 40, width: '100%', maxWidth: 400 }}>
             {[
               { icon: '📅', tk: 'feat1_title' as const, sk: 'feat1_sub' as const, bg: 'rgba(124,109,250,0.15)' },
@@ -84,14 +85,13 @@ export default function LoginPage() {
           </div>
         </div>
 
-        {/* Right panel */}
+        {/* Right */}
         <div style={{ width: 420, flexShrink: 0, background: 'var(--bg2)', borderLeft: '1px solid var(--border)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '48px 40px' }}>
           <div style={{ textAlign: 'center', marginBottom: 32 }}>
             <div style={{ margin: '0 auto 12px', display: 'flex', justifyContent: 'center' }}><NexusIcon size={48} /></div>
             <div style={{ fontFamily: 'Syne', fontSize: 26, fontWeight: 800, letterSpacing: -0.5, marginBottom: 6 }}>Nexus</div>
             <div style={{ fontSize: 14, color: 'var(--text2)' }}>{t(lang, 'login_welcome')}</div>
           </div>
-
           <button className="google-btn" onClick={startLogin}>
             <svg width="20" height="20" viewBox="0 0 48 48">
               <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
@@ -101,7 +101,6 @@ export default function LoginPage() {
             </svg>
             {t(lang, 'login_btn')}
           </button>
-
           <div style={{ fontSize: 11, color: 'var(--text3)', textAlign: 'center', marginTop: 14, lineHeight: 1.7 }}>
             {t(lang, 'login_terms').split('\n').map((line, i) => <div key={i}>{line}</div>)}
           </div>
