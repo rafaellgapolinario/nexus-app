@@ -14,7 +14,7 @@ async function callOpenRouter(messages: Message[], systemPrompt: string): Promis
       'X-Title': 'Nexus AI Assistant',
     },
     body: JSON.stringify({
-      model: 'google/gemini-flash-1.5',
+      model: 'google/gemini-2.0-flash-001',
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       max_tokens: 500,
       temperature: 0.7,
