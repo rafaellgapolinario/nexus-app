@@ -10,7 +10,7 @@ async function callOpenRouter(messages: Message[], systemPrompt: string): Promis
     headers: {
       Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://nexus-app.vercel.app',
+      'HTTP-Referer': 'https://nexus-app-inky-beta.vercel.app',
       'X-Title': 'Nexus AI Assistant',
     },
     body: JSON.stringify({
@@ -26,7 +26,6 @@ async function callOpenRouter(messages: Message[], systemPrompt: string): Promis
 }
 
 async function callGemini(messages: Message[], systemPrompt: string, apiKey: string): Promise<string> {
-  // Flatten messages into Gemini format
   const contents = messages.map(m => ({
     role: m.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: m.content }],
@@ -50,36 +49,34 @@ async function callGemini(messages: Message[], systemPrompt: string, apiKey: str
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, userName, lang, calendarContext, geminiKey } = await req.json()
+    const { messages, userName, lang, calendarContext, geminiKey, voiceMode } = await req.json()
 
     const langNames: Record<string, string> = {
-      pt: 'português brasileiro', en: 'English', es: 'español'
+      pt: 'português brasileiro', en: 'English', es: 'español',
     }
-    const systemPrompt = `You are Nexus, a productivity AI assistant for ${userName || 'user'}. 
-Respond ONLY in ${langNames[lang] || 'português brasileiro'}.
-You help manage Google Calendar events, tasks, and productivity.
-Be direct, friendly, and practical. Maximum 3 short paragraphs.
-${calendarContext ? `User's calendar context: ${calendarContext}` : ''}`
+
+    // Voice mode: shorter, more conversational responses
+    const voiceInstruction = voiceMode
+      ? 'Responda de forma MUITO curta e conversacional (máx 2 frases). Sem markdown, sem listas, sem emojis. Fale como se estivesse numa conversa oral.'
+      : 'Seja direto e objetivo. Máximo 3 parágrafos curtos.'
+
+    const systemPrompt = `Você é Nexus, assistente inteligente de ${userName || 'usuário'}.
+Responda APENAS em ${langNames[lang] || 'português brasileiro'}.
+Você tem acesso ao Google Calendar e pode ajudar com agenda, tarefas, produtividade e rotina.
+${voiceInstruction}
+${calendarContext ? `Contexto da agenda: ${calendarContext}` : ''}
+Data/hora atual: ${new Date().toLocaleString('pt-BR')}`
 
     let reply: string
 
-    // Priority: OpenRouter (server key) → Gemini (user key) → fallback
     if (process.env.OPENROUTER_API_KEY) {
       reply = await callOpenRouter(messages, systemPrompt)
     } else if (geminiKey || process.env.GEMINI_API_KEY) {
       reply = await callGemini(messages, systemPrompt, geminiKey || process.env.GEMINI_API_KEY!)
     } else {
-      // Graceful fallback
-      const lastMsg = messages[messages.length - 1]?.content?.toLowerCase() || ''
-      if (lastMsg.includes('reunião') || lastMsg.includes('meeting') || lastMsg.includes('evento')) {
-        reply = lang === 'en'
-          ? '📅 To create events with AI, configure an API key in Settings (free at aistudio.google.com) or set OPENROUTER_API_KEY in your Vercel environment.'
-          : '📅 Para criar eventos com IA, configure uma chave de API em Configurações (grátis em aistudio.google.com) ou defina OPENROUTER_API_KEY no ambiente Vercel.'
-      } else {
-        reply = lang === 'en'
-          ? '🔑 Configure an AI API key in Settings to enable smart responses. Your Google Calendar is already connected!'
-          : '🔑 Configure uma chave de API em Configurações para ativar respostas inteligentes. Seu Google Calendar já está conectado!'
-      }
+      reply = lang === 'en'
+        ? 'Configure an AI API key in Settings to enable smart responses.'
+        : 'Configure uma chave de API em Configurações para ativar respostas inteligentes.'
     }
 
     return NextResponse.json({ reply })

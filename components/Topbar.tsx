@@ -8,6 +8,7 @@ interface PageInfo { titleKey?: TKey; title?: string; sub?: string }
 
 const TITLES: Record<string, PageInfo> = {
   '/':            { titleKey: 'nav_home',     sub: '' },
+  '/jarvis':      { title: '⚡ Nexus Jarvis', sub: 'Modo voz — diga "Hey Nexus"' },
   '/agent':       { titleKey: 'nav_agent',    sub: 'OpenRouter · Gemini · GPT-4' },
   '/calendar':    { titleKey: 'nav_calendar', sub: 'Google Calendar' },
   '/whatsapp':    { titleKey: 'nav_whatsapp', sub: 'Z-API' },
