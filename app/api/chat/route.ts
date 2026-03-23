@@ -17,7 +17,7 @@ async function callOpenRouter(messages: Message[], systemPrompt: string): Promis
       model: 'google/gemini-2.0-flash-001',
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       max_tokens: 500,
-      temperature: 0.7,
+      temperature: 0.3,
     }),
   })
   if (!res.ok) throw new Error(`OpenRouter error: ${res.status}`)
@@ -37,7 +37,7 @@ async function callGemini(messages: Message[], systemPrompt: string, apiKey: str
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: systemPrompt }] }, ...contents],
-        generationConfig: { maxOutputTokens: 500, temperature: 0.7 },
+        generationConfig: { maxOutputTokens: 500, temperature: 0.3 },
       }),
     }
   )
@@ -49,23 +49,43 @@ async function callGemini(messages: Message[], systemPrompt: string, apiKey: str
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, userName, lang, calendarContext, geminiKey, voiceMode } = await req.json()
+    const { messages, userName, lang, calendarContext, geminiKey, voiceMode, notesContext } = await req.json()
 
     const langNames: Record<string, string> = {
       pt: 'português brasileiro', en: 'English', es: 'español',
     }
 
-    // Voice mode: shorter, more conversational responses
-    const voiceInstruction = voiceMode
-      ? 'Responda de forma MUITO curta e conversacional (máx 2 frases). Sem markdown, sem listas, sem emojis. Fale como se estivesse numa conversa oral.'
-      : 'Seja direto e objetivo. Máximo 3 parágrafos curtos.'
+    const now = new Date().toLocaleString('pt-BR', { 
+      timeZone: 'America/Sao_Paulo',
+      weekday: 'long', day: '2-digit', month: 'long', year: 'numeric', 
+      hour: '2-digit', minute: '2-digit'
+    })
 
-    const systemPrompt = `Você é Nexus, assistente inteligente de ${userName || 'usuário'}.
+    const voiceInstruction = voiceMode
+      ? 'Responda de forma MUITO curta e conversacional (máx 2 frases). Sem markdown, sem listas, sem emojis. Fale como numa conversa oral natural.'
+      : 'Seja direto e objetivo. Use markdown quando ajudar a organizar a resposta.'
+
+    // Build calendar context
+    const calSection = calendarContext
+      ? `\n\nAGENDA REAL DO USUÁRIO (USE ESTES DADOS, NÃO INVENTE):\n${calendarContext}\nSe a agenda estiver vazia, diga que não há eventos cadastrados. NUNCA invente eventos.`
+      : '\n\nAGENDA: Nenhum evento carregado no momento. Se perguntarem sobre agenda, oriente a sincronizar o Google Calendar primeiro.'
+
+    // Notes context
+    const notesSection = notesContext
+      ? `\n\nANOTAÇÕES DO USUÁRIO:\n${notesContext}`
+      : ''
+
+    const systemPrompt = `Você é Nexus, assistente pessoal inteligente de ${userName || 'usuário'}.
 Responda APENAS em ${langNames[lang] || 'português brasileiro'}.
-Você tem acesso ao Google Calendar e pode ajudar com agenda, tarefas, produtividade e rotina.
+Data e hora atual: ${now}
+
+REGRAS IMPORTANTES:
+- NUNCA invente eventos, tarefas, compromissos ou dados que não foram fornecidos
+- Se não tiver informação real, diga claramente que não tem acesso a ela
+- Só fale sobre eventos que estão listados na AGENDA REAL abaixo
+- Para criar eventos, peça confirmação dos detalhes antes
 ${voiceInstruction}
-${calendarContext ? `Contexto da agenda: ${calendarContext}` : ''}
-Data/hora atual: ${new Date().toLocaleString('pt-BR')}`
+${calSection}${notesSection}`
 
     let reply: string
 
@@ -75,7 +95,7 @@ Data/hora atual: ${new Date().toLocaleString('pt-BR')}`
       reply = await callGemini(messages, systemPrompt, geminiKey || process.env.GEMINI_API_KEY!)
     } else {
       reply = lang === 'en'
-        ? 'Configure an AI API key in Settings to enable smart responses.'
+        ? 'Please configure an AI API key in Settings.'
         : 'Configure uma chave de API em Configurações para ativar respostas inteligentes.'
     }
 
