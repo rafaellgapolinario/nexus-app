@@ -20,7 +20,9 @@ const STATE_CFG = {
   speaking:  { color: '#22d3a0', glow: 'rgba(34,211,160,0.5)',  label: 'Nexus falando...' },
 }
 
-const WAKE = ['hey nexus','ei nexus','nexus','oi nexus','ok nexus']
+const WAKE = ['hey nexus','ei nexus','oi nexus','ok nexus']
+const wakeTriggeredRef = { current: false }
+const wakeCooldownRef  = { current: false }
 
 export default function NexusVoicePage() {
   const { lang, userProfile, geminiKey, calendarEvents, showToast, addMessage, chatHistory } = useStore(s => ({
@@ -137,39 +139,63 @@ export default function NexusVoicePage() {
     window.speechSynthesis?.cancel()
     if (wakeRef.current) { try { wakeRef.current.stop() } catch {} wakeRef.current = null }
 
-    const rec = new SR()
-    rec.lang = lang === 'en' ? 'en-US' : 'pt-BR'
-    rec.continuous = false; rec.interimResults = true
-    rec.onstart  = () => { setJState('listening'); listeningR.current = true }
-    rec.onresult = (e: any) => {
-      const t = Array.from(e.results).map((r: any) => r[0].transcript).join('')
-      setTranscript(t)
-      if (e.results[e.results.length-1].isFinal) { stopListening(); sendToAI(t) }
-    }
-    rec.onerror = (e: any) => {
-      stopListening()
-      if (e.error !== 'no-speech' && e.error !== 'aborted') showToast('Mic: ' + e.error)
-    }
-    rec.onend = () => { if (listeningR.current) stopListening() }
-    recRef.current = rec
-    try { rec.start() } catch { showToast('Erro ao iniciar microfone.') }
+    // Small delay to let wake word audio clear from mic buffer
+    setTimeout(() => {
+      const rec = new SR()
+      rec.lang = lang === 'en' ? 'en-US' : 'pt-BR'
+      rec.continuous = false; rec.interimResults = true
+      rec.onstart  = () => { setJState('listening'); listeningR.current = true }
+      rec.onresult = (e: any) => {
+        const raw = Array.from(e.results).map((r: any) => r[0].transcript).join('')
+        // Remove wake word from transcript so it doesn't get sent to AI
+        let clean = raw
+        WAKE.forEach(w => { clean = clean.toLowerCase().replace(w, '').trim() })
+        const display = clean || raw
+        setTranscript(display)
+        if (e.results[e.results.length-1].isFinal) {
+          stopListening()
+          const toSend = display.trim()
+          if (toSend.length > 1) sendToAI(toSend)
+        }
+      }
+      rec.onerror = (e: any) => {
+        stopListening()
+        if (e.error !== 'no-speech' && e.error !== 'aborted') showToast('Mic: ' + e.error)
+      }
+      rec.onend = () => { if (listeningR.current) stopListening() }
+      recRef.current = rec
+      try { rec.start() } catch { showToast('Erro ao iniciar microfone.') }
+    }, 400)
   }, [lang, sendToAI, showToast, stopListening])
 
   // ── Wake Word ────────────────────────────────────────────
   const restartWake = useCallback(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SR || listeningR.current) return
+    if (!SR || listeningR.current || wakeCooldownRef.current) return
     const rec = new SR()
     rec.lang = lang === 'en' ? 'en-US' : 'pt-BR'
     rec.continuous = true; rec.interimResults = true
     rec.onresult = (e: any) => {
+      if (listeningR.current || jStateRef.current !== 'idle' || wakeCooldownRef.current) return
       const t = Array.from(e.results).map((r: any) => r[0].transcript).join('').toLowerCase().trim()
-      if (WAKE.some(p => t.includes(p)) && !listeningR.current && jStateRef.current === 'idle') {
+      if (WAKE.some(p => t.includes(p))) {
+        // Set cooldown to prevent double trigger
+        wakeCooldownRef.current = true
+        wakeTriggeredRef.current = true
         try { rec.stop() } catch {} wakeRef.current = null
-        setTimeout(() => startListening(), 400)
+        setTimeout(() => {
+          wakeCooldownRef.current = false
+          wakeTriggeredRef.current = false
+          if (!listeningR.current) startListening()
+        }, 600)
       }
     }
-    rec.onend   = () => { wakeRef.current = null; if (!listeningR.current) setTimeout(restartWake, 2500) }
+    rec.onend   = () => {
+      wakeRef.current = null
+      if (!listeningR.current && !wakeCooldownRef.current) {
+        setTimeout(restartWake, 2000)
+      }
+    }
     rec.onerror = () => { wakeRef.current = null; setTimeout(restartWake, 3000) }
     wakeRef.current = rec
     try { rec.start() } catch {}
