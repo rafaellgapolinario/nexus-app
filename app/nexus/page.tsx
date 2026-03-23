@@ -20,7 +20,7 @@ const STATE_CFG = {
   speaking:  { color: '#22d3a0', glow: 'rgba(34,211,160,0.5)',  label: 'Nexus falando...' },
 }
 
-const WAKE_PHRASES = ['hey nexus','ei nexus','nexus','oi nexus','ok nexus','nexus,']
+const WAKE = ['hey nexus','ei nexus','nexus','oi nexus','ok nexus']
 
 export default function NexusVoicePage() {
   const { lang, userProfile, geminiKey, calendarEvents, showToast, addMessage, chatHistory } = useStore(s => ({
@@ -29,47 +29,74 @@ export default function NexusVoicePage() {
     addMessage: s.addMessage, chatHistory: s.chatHistory,
   }))
 
-  const [jState,    setJState]    = useState<JState>('idle')
-  const [messages,  setMessages]  = useState<Msg[]>([{
+  const [jState,    setJState]   = useState<JState>('idle')
+  const [messages,  setMessages] = useState<Msg[]>([{
     id: uid(), role: 'nexus', time: nowStr(),
     text: `Olá${userProfile ? ', ' + (userProfile.given_name || userProfile.name) : ''}! Sou o Nexus. Diga "Hey Nexus" ou pressione Espaço para começar.`,
   }])
   const [transcript, setTranscript] = useState('')
   const [inputText,  setInputText]  = useState('')
+  const [useEleven,  setUseEleven]  = useState(true) // ElevenLabs TTS
 
-  const recRef      = useRef<any>(null)
-  const wakeRef     = useRef<any>(null)
-  const synthRef    = useRef<SpeechSynthesis | null>(null)
-  const listeningR  = useRef(false)
-  const jStateRef   = useRef<JState>('idle')
-  const endRef      = useRef<HTMLDivElement>(null)
+  const recRef     = useRef<any>(null)
+  const wakeRef    = useRef<any>(null)
+  const audioRef   = useRef<HTMLAudioElement | null>(null)
+  const listeningR = useRef(false)
+  const jStateRef  = useRef<JState>('idle')
+  const endRef     = useRef<HTMLDivElement>(null)
 
   useEffect(() => { jStateRef.current = jState }, [jState])
-  useEffect(() => { if (typeof window !== 'undefined') synthRef.current = window.speechSynthesis }, [])
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
-  // ── TTS ─────────────────────────────────────────────────────────
-  const speak = useCallback((text: string) => {
-    if (!synthRef.current) return
-    synthRef.current.cancel()
+  // ── ElevenLabs TTS ───────────────────────────────────────
+  const speakElevenLabs = useCallback(async (text: string) => {
     setJState('speaking')
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: cleanTTS(text) }),
+      })
+      if (!res.ok) throw new Error('TTS failed')
+      const blob = await res.blob()
+      const url  = URL.createObjectURL(blob)
+      if (audioRef.current) { audioRef.current.pause(); URL.revokeObjectURL(audioRef.current.src) }
+      const audio = new Audio(url)
+      audioRef.current = audio
+      audio.onended = () => { setJState('idle'); URL.revokeObjectURL(url); setTimeout(restartWake, 500) }
+      audio.onerror = () => { setJState('idle'); fallbackTTS(text) }
+      await audio.play()
+    } catch {
+      fallbackTTS(text)
+    }
+  }, [])
+
+  // ── Fallback browser TTS ─────────────────────────────────
+  const fallbackTTS = useCallback((text: string) => {
+    setJState('speaking')
+    const synth = window.speechSynthesis
+    synth.cancel()
     const u = new SpeechSynthesisUtterance(cleanTTS(text))
-    u.lang    = lang === 'en' ? 'en-US' : lang === 'es' ? 'es-ES' : 'pt-BR'
-    u.rate    = 1.05; u.pitch = 1.0; u.volume = 0.95
-    const voices = synthRef.current.getVoices()
-    const pref = voices.find(v => v.lang.startsWith(lang === 'en' ? 'en' : lang === 'es' ? 'es' : 'pt') && v.name.toLowerCase().includes('google'))
-      || voices.find(v => v.lang.startsWith(lang === 'en' ? 'en' : lang === 'es' ? 'es' : 'pt'))
-    if (pref) u.voice = pref
-    u.onend = () => { setJState('idle'); setTimeout(() => restartWake(), 500) }
+    u.lang  = lang === 'en' ? 'en-US' : 'pt-BR'
+    u.rate  = 1.0; u.pitch = 1.1; u.volume = 0.95
+    const voices = synth.getVoices()
+    const v = voices.find(x => x.lang.startsWith(lang === 'en' ? 'en' : 'pt') && x.name.toLowerCase().includes('google'))
+      || voices.find(x => x.lang.startsWith(lang === 'en' ? 'en' : 'pt'))
+    if (v) u.voice = v
+    u.onend = () => { setJState('idle'); setTimeout(restartWake, 500) }
     u.onerror = () => setJState('idle')
-    synthRef.current.speak(u)
+    synth.speak(u)
   }, [lang])
 
-  // ── AI Call ──────────────────────────────────────────────────────
+  const speak = useCallback((text: string) => {
+    if (useEleven) speakElevenLabs(text)
+    else fallbackTTS(text)
+  }, [useEleven, speakElevenLabs, fallbackTTS])
+
+  // ── AI Call ──────────────────────────────────────────────
   const sendToAI = useCallback(async (text: string) => {
     if (!text.trim()) return
-    setJState('thinking')
-    setTranscript('')
+    setJState('thinking'); setTranscript('')
     setMessages(prev => [...prev, { id: uid(), role: 'user', text, time: nowStr() }])
     const calCtx = calendarEvents.slice(0,5).map(ev => `${ev.summary} (${ev.start.dateTime||ev.start.date})`).join(', ')
     try {
@@ -78,8 +105,7 @@ export default function NexusVoicePage() {
         body: JSON.stringify({
           messages: [...chatHistory, { role: 'user', content: text }],
           userName: userProfile?.given_name || userProfile?.name,
-          lang, calendarContext: calCtx, geminiKey,
-          systemExtra: 'Assistente de Voz: respostas MUITO curtas (1-2 frases máx). Sem markdown, sem listas. Direto ao ponto como um assistente pessoal sofisticado.',
+          lang, calendarContext: calCtx, geminiKey, voiceMode: true,
         }),
       })
       const data = await res.json()
@@ -95,7 +121,7 @@ export default function NexusVoicePage() {
     }
   }, [calendarEvents, chatHistory, userProfile, lang, geminiKey, speak, addMessage])
 
-  // ── Stop Listening ───────────────────────────────────────────────
+  // ── Stop Listening ───────────────────────────────────────
   const stopListening = useCallback(() => {
     listeningR.current = false
     if (recRef.current) { try { recRef.current.stop() } catch {} recRef.current = null }
@@ -103,15 +129,16 @@ export default function NexusVoicePage() {
     setTranscript('')
   }, [])
 
-  // ── Start Listening ──────────────────────────────────────────────
+  // ── Start Listening ──────────────────────────────────────
   const startListening = useCallback(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SR) { showToast('Use Chrome para voz.'); return }
-    if (synthRef.current?.speaking) synthRef.current.cancel()
+    if (audioRef.current) { audioRef.current.pause() }
+    window.speechSynthesis?.cancel()
     if (wakeRef.current) { try { wakeRef.current.stop() } catch {} wakeRef.current = null }
 
     const rec = new SR()
-    rec.lang = lang === 'en' ? 'en-US' : lang === 'es' ? 'es-ES' : 'pt-BR'
+    rec.lang = lang === 'en' ? 'en-US' : 'pt-BR'
     rec.continuous = false; rec.interimResults = true
     rec.onstart  = () => { setJState('listening'); listeningR.current = true }
     rec.onresult = (e: any) => {
@@ -128,22 +155,22 @@ export default function NexusVoicePage() {
     try { rec.start() } catch { showToast('Erro ao iniciar microfone.') }
   }, [lang, sendToAI, showToast, stopListening])
 
-  // ── Wake Word ────────────────────────────────────────────────────
+  // ── Wake Word ────────────────────────────────────────────
   const restartWake = useCallback(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SR || listeningR.current) return
     const rec = new SR()
-    rec.lang = lang === 'en' ? 'en-US' : lang === 'es' ? 'es-ES' : 'pt-BR'
+    rec.lang = lang === 'en' ? 'en-US' : 'pt-BR'
     rec.continuous = true; rec.interimResults = true
     rec.onresult = (e: any) => {
       const t = Array.from(e.results).map((r: any) => r[0].transcript).join('').toLowerCase().trim()
-      if (WAKE_PHRASES.some(p => t.includes(p)) && !listeningR.current && jStateRef.current === 'idle') {
+      if (WAKE.some(p => t.includes(p)) && !listeningR.current && jStateRef.current === 'idle') {
         try { rec.stop() } catch {} wakeRef.current = null
         setTimeout(() => startListening(), 400)
       }
     }
-    rec.onend   = () => { wakeRef.current = null; if (!listeningR.current) setTimeout(() => restartWake(), 2500) }
-    rec.onerror = () => { wakeRef.current = null; setTimeout(() => restartWake(), 3000) }
+    rec.onend   = () => { wakeRef.current = null; if (!listeningR.current) setTimeout(restartWake, 2500) }
+    rec.onerror = () => { wakeRef.current = null; setTimeout(restartWake, 3000) }
     wakeRef.current = rec
     try { rec.start() } catch {}
   }, [lang, startListening])
@@ -152,29 +179,35 @@ export default function NexusVoicePage() {
     const t = setTimeout(() => restartWake(), 1500)
     return () => {
       clearTimeout(t)
-      if (wakeRef.current) { try { wakeRef.current.stop() } catch {} }
-      if (recRef.current)  { try { recRef.current.stop()  } catch {} }
-      synthRef.current?.cancel()
+      if (wakeRef.current)  { try { wakeRef.current.stop()  } catch {} }
+      if (recRef.current)   { try { recRef.current.stop()   } catch {} }
+      if (audioRef.current) { audioRef.current.pause() }
+      window.speechSynthesis?.cancel()
     }
   }, [])
 
-  // ── Keyboard shortcuts ───────────────────────────────────────────
+  // ── Keyboard ─────────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName
       if (e.code === 'Space' && !['INPUT','TEXTAREA','SELECT'].includes(tag)) {
         e.preventDefault()
         if (jStateRef.current === 'listening') stopListening()
-        else if (jStateRef.current === 'idle')  startListening()
+        else if (jStateRef.current === 'idle') startListening()
       }
-      if (e.code === 'Escape') { stopListening(); synthRef.current?.cancel(); setJState('idle') }
+      if (e.code === 'Escape') {
+        stopListening()
+        audioRef.current?.pause()
+        window.speechSynthesis?.cancel()
+        setJState('idle')
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [startListening, stopListening])
 
   function handleMicBtn() {
-    if (jState === 'speaking')  { synthRef.current?.cancel(); setJState('idle'); return }
+    if (jState === 'speaking')  { audioRef.current?.pause(); window.speechSynthesis?.cancel(); setJState('idle'); return }
     if (jState === 'listening') { stopListening(); return }
     if (jState === 'idle')      startListening()
   }
@@ -191,23 +224,25 @@ export default function NexusVoicePage() {
       <div style={{ flex:1, display:'flex', flexDirection:'column', height:'100%', background:'var(--bg)', overflow:'hidden' }}>
 
         {/* Header */}
-        <div style={{ padding:'14px 24px', borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'space-between', flexShrink:0, background:'var(--bg)' }}>
+        <div style={{ padding:'12px 24px', borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'space-between', flexShrink:0 }}>
           <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-            <div style={{ width:8, height:8, borderRadius:'50%', background:cfg.color, boxShadow:`0 0 10px ${cfg.glow}`, animation: jState!=='idle'?'pulse 1s infinite':'none' }} />
-            <span style={{ fontFamily:'Syne', fontSize:15, fontWeight:700 }}>Nexus · Assistente de Voz</span>
+            <div style={{ width:8, height:8, borderRadius:'50%', background:cfg.color, boxShadow:`0 0 10px ${cfg.glow}`, animation:jState!=='idle'?'pulse 1s infinite':'none' }} />
+            <span style={{ fontFamily:'Syne', fontSize:15, fontWeight:700 }}>Nexus · Assistente</span>
             <span style={{ fontSize:11, color:'var(--text3)', background:'var(--bg3)', padding:'2px 8px', borderRadius:99, border:'1px solid var(--border)' }}>🎙️ "Hey Nexus"</span>
+            {/* ElevenLabs toggle */}
+            <div onClick={() => setUseEleven(!useEleven)} style={{ display:'flex', alignItems:'center', gap:5, cursor:'pointer', fontSize:11, color: useEleven ? 'var(--green)' : 'var(--text3)', background:'var(--bg3)', padding:'2px 8px', borderRadius:99, border:`1px solid ${useEleven ? 'rgba(34,211,160,0.3)' : 'var(--border)'}` }}>
+              {useEleven ? '🔊 ElevenLabs' : '🔊 Browser TTS'}
+            </div>
           </div>
-          <div style={{ display:'flex', gap:12, fontSize:11, color:'var(--text3)' }}>
-            <span><kbd style={{ background:'var(--bg3)', border:'1px solid var(--border)', borderRadius:4, padding:'1px 6px' }}>Space</kbd> ativar</span>
-            <span><kbd style={{ background:'var(--bg3)', border:'1px solid var(--border)', borderRadius:4, padding:'1px 6px' }}>Esc</kbd> parar</span>
+          <div style={{ display:'flex', gap:10, fontSize:11, color:'var(--text3)' }}>
             <span style={{ color:cfg.color, fontWeight:600 }}>{cfg.label}</span>
           </div>
         </div>
 
         {/* Messages */}
-        <div style={{ flex:1, overflowY:'auto', padding:'20px 32px', display:'flex', flexDirection:'column', gap:14 }}>
+        <div style={{ flex:1, overflowY:'auto', padding:'20px 28px', display:'flex', flexDirection:'column', gap:14 }}>
           {messages.map(msg => (
-            <div key={msg.id} style={{ display:'flex', flexDirection:'column', alignItems: msg.role==='user'?'flex-end':'flex-start', gap:4 }}>
+            <div key={msg.id} style={{ display:'flex', flexDirection:'column', alignItems:msg.role==='user'?'flex-end':'flex-start', gap:4 }}>
               {msg.role==='nexus' && (
                 <div style={{ display:'flex', alignItems:'center', gap:6, marginLeft:4 }}>
                   <div style={{ width:22, height:22, borderRadius:'50%', background:'linear-gradient(135deg,#7c6dfa,#a78bfa)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
@@ -219,10 +254,10 @@ export default function NexusVoicePage() {
               )}
               <div style={{
                 maxWidth:'70%', padding:'12px 18px', fontSize:14, lineHeight:1.65,
-                borderRadius: msg.role==='user' ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
-                background:   msg.role==='user' ? 'linear-gradient(135deg,#7c6dfa,#a78bfa)' : 'var(--bg2)',
-                border:       msg.role==='user' ? 'none' : '1px solid var(--border)',
-                boxShadow:    msg.role==='user' ? '0 4px 20px rgba(124,109,250,0.25)' : 'none',
+                borderRadius:msg.role==='user'?'18px 18px 4px 18px':'18px 18px 18px 4px',
+                background:msg.role==='user'?'linear-gradient(135deg,#7c6dfa,#a78bfa)':'var(--bg2)',
+                border:msg.role==='user'?'none':'1px solid var(--border)',
+                boxShadow:msg.role==='user'?'0 4px 20px rgba(124,109,250,0.25)':'none',
                 color:'var(--text)',
               }}>
                 {msg.text}
@@ -231,7 +266,6 @@ export default function NexusVoicePage() {
             </div>
           ))}
 
-          {/* Live transcript */}
           {transcript && (
             <div style={{ display:'flex', justifyContent:'flex-end' }}>
               <div style={{ maxWidth:'70%', padding:'12px 18px', borderRadius:'18px 18px 4px 18px', background:'rgba(124,109,250,0.1)', border:'1px dashed rgba(124,109,250,0.35)', color:'var(--text2)', fontSize:14, fontStyle:'italic' }}>
@@ -240,7 +274,6 @@ export default function NexusVoicePage() {
             </div>
           )}
 
-          {/* Thinking */}
           {jState==='thinking' && (
             <div style={{ display:'flex', alignItems:'center', gap:8 }}>
               <div style={{ width:22, height:22, borderRadius:'50%', background:'linear-gradient(135deg,#7c6dfa,#a78bfa)', display:'flex', alignItems:'center', justifyContent:'center' }}>
@@ -256,38 +289,31 @@ export default function NexusVoicePage() {
 
         {/* Bottom controls */}
         <div style={{ flexShrink:0, padding:'16px 24px 20px', borderTop:'1px solid var(--border)', background:'var(--bg)' }}>
-
-          {/* Wave bars */}
-          <div style={{ height:36, display:'flex', gap:3, alignItems:'center', justifyContent:'center', marginBottom:14, opacity: jState!=='idle'?1:0, transition:'opacity 0.3s' }}>
-            {Array.from({length:24}).map((_,i) => (
-              <div key={i} style={{ width:3, borderRadius:99, background:cfg.color, boxShadow:`0 0 4px ${cfg.glow}`, animation:`wave ${0.35+Math.sin(i)*0.2}s ${i*0.04}s ease-in-out infinite` }} />
+          {/* Waves */}
+          <div style={{ height:32, display:'flex', gap:3, alignItems:'center', justifyContent:'center', marginBottom:12, opacity:jState!=='idle'?1:0, transition:'opacity 0.3s' }}>
+            {Array.from({length:20}).map((_,i) => (
+              <div key={i} style={{ width:3, borderRadius:99, background:cfg.color, boxShadow:`0 0 4px ${cfg.glow}`, animation:`wave ${0.35+Math.sin(i)*0.2}s ${i*0.05}s ease-in-out infinite` }} />
             ))}
           </div>
 
           {/* Input row */}
           <div style={{ display:'flex', gap:10, alignItems:'flex-end' }}>
-            <textarea
-              rows={1}
-              value={inputText}
-              onChange={e => setInputText(e.target.value)}
+            <textarea rows={1} value={inputText} onChange={e => setInputText(e.target.value)}
               onKeyDown={e => { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend()} }}
               placeholder="Ou digita aqui... (Enter para enviar)"
               style={{ flex:1, background:'var(--bg2)', border:'1px solid var(--border2)', borderRadius:14, padding:'12px 16px', color:'var(--text)', fontSize:14, outline:'none', resize:'none', minHeight:46, maxHeight:100, fontFamily:'DM Sans' }}
             />
-
-            {/* Big mic button */}
-            <button onClick={handleMicBtn} title={jState==='idle'?'Ativar Nexus':'Parar'} style={{
+            <button onClick={handleMicBtn} style={{
               width:58, height:58, borderRadius:'50%', border:'none', cursor:'pointer', flexShrink:0,
               background:`radial-gradient(circle at 35% 35%, ${cfg.color}, ${cfg.color}99)`,
-              boxShadow: jState!=='idle' ? `0 0 0 8px ${cfg.glow}, 0 0 32px ${cfg.glow}` : `0 4px 20px ${cfg.glow}`,
-              display:'flex', alignItems:'center', justifyContent:'center',
-              transition:'all 0.3s ease',
-              animation: jState==='listening' ? 'micPulse 1.2s ease-in-out infinite' : 'none',
+              boxShadow:jState!=='idle'?`0 0 0 8px ${cfg.glow},0 0 32px ${cfg.glow}`:`0 4px 20px ${cfg.glow}`,
+              display:'flex', alignItems:'center', justifyContent:'center', transition:'all 0.3s',
+              animation:jState==='listening'?'micPulse 1.2s ease-in-out infinite':'none',
             }}>
               {jState==='speaking' ? (
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
               ) : jState==='thinking' ? (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                <div style={{ width:22, height:22, border:'3px solid rgba(255,255,255,0.3)', borderTopColor:'#fff', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
               ) : (
                 <svg width="22" height="22" fill="none" viewBox="0 0 24 24" stroke="white" strokeWidth="2">
                   <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
@@ -297,8 +323,7 @@ export default function NexusVoicePage() {
                 </svg>
               )}
             </button>
-
-            <button onClick={handleSend} disabled={!inputText.trim()} style={{ width:46, height:46, borderRadius:12, background:inputText.trim()?'var(--accent)':'var(--bg3)', border:'1px solid var(--border)', cursor:inputText.trim()?'pointer':'not-allowed', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, opacity:inputText.trim()?1:0.4, transition:'all 0.2s' }}>
+            <button onClick={handleSend} disabled={!inputText.trim()} style={{ width:46, height:46, borderRadius:12, background:inputText.trim()?'var(--accent)':'var(--bg3)', border:'1px solid var(--border)', cursor:inputText.trim()?'pointer':'not-allowed', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, opacity:inputText.trim()?1:0.4 }}>
               <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="white" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
             </button>
           </div>
@@ -306,14 +331,15 @@ export default function NexusVoicePage() {
           {/* Quick commands */}
           <div style={{ display:'flex', gap:8, marginTop:10, flexWrap:'wrap' }}>
             {[
-              ['📅 Agenda hoje',       'O que tenho na agenda hoje?'],
-              ['➕ Novo evento',        'Quero criar um novo evento'],
-              ['💬 Avisar equipe',      'Manda uma mensagem no WhatsApp pra equipe'],
-              ['⚡ Produtividade',     'Como posso ser mais produtivo hoje?'],
-              ['🧠 Resumo da semana',  'Me dá um resumo do que tenho essa semana'],
-              ['💰 Finanças',          'Me ajuda a organizar minhas finanças'],
+              ['📅 Agenda hoje',      'O que tenho na agenda hoje?'],
+              ['➕ Novo evento',       'Quero criar um novo evento'],
+              ['💬 Avisar equipe',     'Manda mensagem no WhatsApp pra equipe'],
+              ['⚡ Produtividade',    'Como posso ser mais produtivo hoje?'],
+              ['🧠 Resumo da semana', 'Me dá um resumo do que tenho essa semana'],
+              ['💰 Finanças',         'Me ajuda a organizar minhas finanças'],
             ].map(([label, msg]) => (
-              <button key={label} onClick={() => sendToAI(msg)} style={{ background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:99, padding:'5px 12px', fontSize:11, color:'var(--text2)', cursor:'pointer', fontFamily:'DM Sans', transition:'all 0.15s' }}
+              <button key={label as string} onClick={() => sendToAI(msg as string)}
+                style={{ background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:99, padding:'5px 12px', fontSize:11, color:'var(--text2)', cursor:'pointer', fontFamily:'DM Sans', transition:'all 0.15s' }}
                 onMouseEnter={e=>{(e.currentTarget.style.borderColor='var(--accent)');(e.currentTarget.style.color='var(--accent2)')}}
                 onMouseLeave={e=>{(e.currentTarget.style.borderColor='var(--border)');(e.currentTarget.style.color='var(--text2)')}}>
                 {label}
@@ -326,7 +352,8 @@ export default function NexusVoicePage() {
       <style>{`
         @keyframes bounce   { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
         @keyframes pulse    { 0%,100%{opacity:1} 50%{opacity:0.4} }
-        @keyframes wave     { 0%,100%{height:6px} 50%{height:28px} }
+        @keyframes wave     { 0%,100%{height:4px} 50%{height:24px} }
+        @keyframes spin     { to{transform:rotate(360deg)} }
         @keyframes micPulse {
           0%,100%{box-shadow:0 0 0 0 rgba(248,113,113,0.5),0 4px 20px rgba(248,113,113,0.4)}
           50%{box-shadow:0 0 0 14px rgba(248,113,113,0),0 4px 20px rgba(248,113,113,0.4)}
