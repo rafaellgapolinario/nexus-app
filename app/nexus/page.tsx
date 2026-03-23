@@ -108,6 +108,7 @@ export default function NexusVoicePage() {
           messages: [...chatHistory, { role: 'user', content: text }],
           userName: userProfile?.given_name || userProfile?.name,
           lang, calendarContext: calCtx, geminiKey, voiceMode: true,
+          userEmail: userProfile?.email,
         }),
       })
       const data = await res.json()
@@ -115,6 +116,7 @@ export default function NexusVoicePage() {
       setMessages(prev => [...prev, { id: uid(), role: 'nexus', text: reply, time: nowStr() }])
       addMessage({ role: 'user', content: text })
       addMessage({ role: 'assistant', content: reply })
+      if (data.noteCreated) showToast('📝 Anotação salva!')
       speak(reply)
     } catch {
       const err = 'Erro de conexão. Tente novamente.'
