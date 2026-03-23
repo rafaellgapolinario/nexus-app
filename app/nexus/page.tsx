@@ -42,40 +42,52 @@ export default function NexusPage() {
   useEffect(()=>{ endRef.current?.scrollIntoView({behavior:'smooth'}) },[msgs])
 
   // ── Speak ─────────────────────────────────────────────
-  const speak = useCallback(async (text:string) => {
+  const browserSpeak = useCallback((text: string) => {
     setState('speaking')
-    // Try ElevenLabs first
-    if (process.env.NEXT_PUBLIC_USE_ELEVENLABS !== 'false') {
-      try {
-        const res = await fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:cleanSpeak(text)})})
-        if (res.ok) {
-          const blob = await res.blob()
-          const url  = URL.createObjectURL(blob)
-          if(audioRef.current){audioRef.current.pause();URL.revokeObjectURL(audioRef.current.src)}
-          const audio = new Audio(url)
-          audioRef.current = audio
-          audio.onended = ()=>{ setState('idle'); URL.revokeObjectURL(url); setTimeout(startWake,800) }
-          audio.onerror = ()=>{ setState('idle'); browserSpeak(text) }
-          await audio.play(); return
-        }
-      } catch {}
-    }
-    browserSpeak(text)
-  },[])
-
-  const browserSpeak = useCallback((text:string)=>{
-    setState('speaking')
-    const synth = synthRef.current; if(!synth){setState('idle');return}
+    const synth = window.speechSynthesis
+    if (!synth) { setState('idle'); setTimeout(startWake, 500); return }
     synth.cancel()
-    const u = new SpeechSynthesisUtterance(cleanSpeak(text))
-    u.lang  = lang==='en'?'en-US':'pt-BR'; u.rate=1.05; u.pitch=1; u.volume=0.95
-    const v = synth.getVoices().find(x=>x.lang.startsWith(lang==='en'?'en':'pt')&&x.name.toLowerCase().includes('google'))
-           || synth.getVoices().find(x=>x.lang.startsWith(lang==='en'?'en':'pt'))
-    if(v) u.voice=v
-    u.onend  = ()=>{ setState('idle'); setTimeout(startWake,800) }
-    u.onerror= ()=>  setState('idle')
-    synth.speak(u)
-  },[lang])
+    // Wait for voices to load
+    const doSpeak = () => {
+      const u = new SpeechSynthesisUtterance(cleanSpeak(text))
+      u.lang   = lang === 'en' ? 'en-US' : 'pt-BR'
+      u.rate   = 1.0; u.pitch = 1.1; u.volume = 1.0
+      const voices = synth.getVoices()
+      const v = voices.find(x => x.lang.startsWith(lang === 'en' ? 'en' : 'pt') && x.name.toLowerCase().includes('google'))
+             || voices.find(x => x.lang.startsWith(lang === 'en' ? 'en' : 'pt'))
+             || voices[0]
+      if (v) u.voice = v
+      u.onend  = () => { setState('idle'); setTimeout(startWake, 800) }
+      u.onerror = () => { setState('idle'); setTimeout(startWake, 800) }
+      synth.speak(u)
+    }
+    const voices = synth.getVoices()
+    if (voices.length > 0) { doSpeak() }
+    else { synth.onvoiceschanged = doSpeak }
+  }, [lang])
+
+  const speak = useCallback(async (text: string) => {
+    setState('speaking')
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: cleanSpeak(text) }),
+      })
+      if (!res.ok) throw new Error('TTS failed')
+      const blob  = await res.blob()
+      const url   = URL.createObjectURL(blob)
+      if (audioRef.current) { audioRef.current.pause(); URL.revokeObjectURL(audioRef.current.src) }
+      const audio = new Audio(url)
+      audioRef.current = audio
+      audio.onended = () => { setState('idle'); URL.revokeObjectURL(url); setTimeout(startWake, 800) }
+      audio.onerror = () => { setState('idle'); URL.revokeObjectURL(url); browserSpeak(text) }
+      await audio.play()
+    } catch {
+      // ElevenLabs not available — use browser TTS
+      browserSpeak(text)
+    }
+  }, [browserSpeak])
 
   // ── Send to AI ────────────────────────────────────────
   const sendToAI = useCallback(async (text:string)=>{
