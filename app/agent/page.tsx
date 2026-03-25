@@ -17,14 +17,17 @@ interface ApiResponse {
 }
 
 // ── Chips de sugestão ─────────────────────────────────────────────────────────
-type ChipLang = { pt: string; en: string; es: string }
-const CHIPS: { key: TKey; msg: ChipLang }[] = [
-  { key: 'chip_today',      msg: { pt: 'O que tenho na agenda hoje?',           en: "What's on my calendar today?",  es: '¿Qué tengo hoy?' } },
-  { key: 'chip_meeting',    msg: { pt: 'Marcar reunião com equipe sexta às 15h', en: 'Schedule team meeting Friday 3pm', es: 'Reunión equipo viernes 15h' } },
-  { key: 'chip_productivity',msg:{ pt: 'Dicas para ser mais produtivo hoje',     en: 'Tips to be more productive today', es: 'Consejos productividad hoy' } },
-  { key: 'chip_upcoming',   msg: { pt: 'Meus próximos 5 eventos',                en: 'My next 5 events',               es: 'Mis próximos 5 eventos' } },
-  { key: 'chip_habit',      msg: { pt: 'Quero criar hábito de meditar 10min',   en: 'Create habit: meditate 10min',   es: 'Hábito: meditar 10min' } },
-  { key: 'chip_finance',    msg: { pt: 'Gastei R$45 no almoço hoje',             en: 'I spent $45 on lunch today',     es: 'Gasté $45 en almuerzo hoy' } },
+// Chips extras que não usam TKey (texto fixo para não quebrar o TypeScript)
+interface Chip { label: string; msg: { pt: string; en: string; es: string } }
+const CHIPS_TKEY: { key: TKey; msg: { pt: string; en: string; es: string } }[] = [
+  { key: 'chip_today',       msg: { pt: 'O que tenho na agenda hoje?',            en: "What's on my calendar today?",     es: '¿Qué tengo hoy?' } },
+  { key: 'chip_meeting',     msg: { pt: 'Marcar reunião com equipe sexta às 15h', en: 'Schedule team meeting Friday 3pm', es: 'Reunión equipo viernes 15h' } },
+  { key: 'chip_productivity',msg: { pt: 'Dicas para ser mais produtivo hoje',     en: 'Tips to be more productive today', es: 'Consejos productividad hoy' } },
+  { key: 'chip_upcoming',    msg: { pt: 'Meus próximos 5 eventos',                en: 'My next 5 events',                 es: 'Mis próximos 5 eventos' } },
+]
+const CHIPS_EXTRA: Chip[] = [
+  { label: '🎯 Criar hábito', msg: { pt: 'Quero criar hábito de meditar 10min', en: 'Create habit: meditate 10min', es: 'Hábito: meditar 10min' } },
+  { label: '💸 Registrar gasto', msg: { pt: 'Gastei R$45 no almoço hoje', en: 'I spent $45 on lunch today', es: 'Gasté $45 en almuerzo hoy' } },
 ]
 
 // ── Ícone de intent ───────────────────────────────────────────────────────────
@@ -210,17 +213,22 @@ export default function AgentPage() {
 
         {/* Chips */}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, padding: '14px 32px 0' }}>
-          {CHIPS.map(({ key, msg }) => (
-            <div
-              key={key}
-              onClick={() => sendMsg(msg[lang] || msg.pt)}
-              style={{
-                background: 'var(--bg2)', border: '1px solid var(--border)',
-                borderRadius: 99, padding: '6px 14px', fontSize: 12,
-                color: 'var(--text2)', cursor: 'pointer', transition: 'all 0.15s',
-              }}
-            >
+          {CHIPS_TKEY.map(({ key, msg }) => (
+            <div key={key} onClick={() => sendMsg(msg[lang] || msg.pt)} style={{
+              background: 'var(--bg2)', border: '1px solid var(--border)',
+              borderRadius: 99, padding: '6px 14px', fontSize: 12,
+              color: 'var(--text2)', cursor: 'pointer', transition: 'all 0.15s',
+            }}>
               {t(lang, key)}
+            </div>
+          ))}
+          {CHIPS_EXTRA.map(({ label, msg }) => (
+            <div key={label} onClick={() => sendMsg(msg[lang] || msg.pt)} style={{
+              background: 'var(--bg2)', border: '1px solid var(--border)',
+              borderRadius: 99, padding: '6px 14px', fontSize: 12,
+              color: 'var(--text2)', cursor: 'pointer', transition: 'all 0.15s',
+            }}>
+              {label}
             </div>
           ))}
         </div>
