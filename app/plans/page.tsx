@@ -1,347 +1,413 @@
 'use client'
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { useState } from 'react'
 import { useStore } from '@/lib/store'
 import { AppShell } from '@/components/AppShell'
+import type { Plan } from '@/lib/types'
 
-interface Msg { id: string; role: 'user'|'nexus'; text: string; time: string; tag?: string }
-type State = 'idle'|'listening'|'thinking'|'speaking'
+// ── Config de planos ──────────────────────────────────────────────────────────
+const PLANS = [
+  {
+    id: 'free' as Plan,
+    label: 'Free',
+    monthlyPrice: 0,
+    annualPrice: 0,
+    color: 'var(--text2)',
+    badge: '🆓 Gratuito',
+    cta: 'Usar grátis',
+    features: [
+      { ok: true,  text: 'Chat IA (50 msgs/dia)' },
+      { ok: true,  text: 'Google Calendar integrado' },
+      { ok: true,  text: 'Dashboard de produtividade' },
+      { ok: true,  text: '3 hábitos simultâneos' },
+      { ok: false, text: 'Voz neural (Azure TTS)' },
+      { ok: false, text: 'Chat IA ilimitado' },
+      { ok: false, text: 'Controle financeiro' },
+      { ok: false, text: 'WhatsApp automático' },
+      { ok: false, text: 'Automações' },
+      { ok: false, text: 'Suporte prioritário' },
+    ],
+  },
+  {
+    id: 'pro' as Plan,
+    label: 'Pro',
+    monthlyPrice: 29.9,
+    annualPrice: 239,
+    color: 'var(--accent2)',
+    badge: '⭐ Pro',
+    cta: 'Assinar Pro',
+    popular: true,
+    features: [
+      { ok: true,  text: 'Chat IA ilimitado' },
+      { ok: true,  text: 'Google Calendar integrado' },
+      { ok: true,  text: 'Dashboard de produtividade' },
+      { ok: true,  text: 'Hábitos ilimitados + streak' },
+      { ok: true,  text: 'Voz neural (Azure TTS)' },
+      { ok: true,  text: 'Controle financeiro completo' },
+      { ok: true,  text: 'WhatsApp automático (Z-API)' },
+      { ok: true,  text: '10 automações' },
+      { ok: false, text: 'Multi-usuário' },
+      { ok: false, text: 'API access' },
+    ],
+  },
+  {
+    id: 'business' as Plan,
+    label: 'Business',
+    monthlyPrice: 97,
+    annualPrice: 779,
+    color: 'var(--amber)',
+    badge: '🚀 Business',
+    cta: 'Assinar Business',
+    features: [
+      { ok: true,  text: 'Tudo do Pro' },
+      { ok: true,  text: 'Multi-usuário (até 10 pessoas)' },
+      { ok: true,  text: 'Automações ilimitadas' },
+      { ok: true,  text: 'API access (REST)' },
+      { ok: true,  text: 'Relatórios avançados + BI' },
+      { ok: true,  text: 'Gestão de projetos completa' },
+      { ok: true,  text: 'Suporte prioritário 24h' },
+      { ok: true,  text: 'Onboarding personalizado' },
+      { ok: true,  text: 'SLA garantido' },
+      { ok: true,  text: 'White-label disponível' },
+    ],
+  },
+]
 
-function uid()    { return Math.random().toString(36).slice(2) }
-function timeStr(){ return new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) }
-function cleanSpeak(t:string){ return t.replace(/\*\*(.*?)\*\*/g,'$1').replace(/#{1,6}\s/g,'').replace(/[📅✅⏰📝💡🔥⚡🎉]/g,'').substring(0,350) }
+const FAQS = [
+  { q: 'Posso cancelar a qualquer momento?', a: 'Sim. Cancele quando quiser, sem multas ou burocracia. Você mantém acesso até o fim do período pago.' },
+  { q: 'A garantia de 14 dias funciona mesmo?', a: 'Sim. Se por qualquer motivo não ficar satisfeito nos primeiros 14 dias, devolvemos 100% do valor — sem perguntas.' },
+  { q: 'O plano anual tem desconto?', a: 'Sim! No anual você economiza 33% (Pro) e 33% (Business), pagando tudo de uma vez com desconto.' },
+  { q: 'Posso trocar de plano depois?', a: 'Pode! Upgrade ou downgrade a qualquer momento. A diferença é calculada proporcionalmente.' },
+  { q: 'Como funciona o multi-usuário?', a: 'No Business, você convida até 10 membros. Cada um tem seu login e acessa o painel compartilhado da equipe.' },
+]
 
-const COLORS:Record<State,string> = {
-  idle:'#7c6dfa', listening:'#f87171', thinking:'#f59e0b', speaking:'#22d3a0'
+// ── Componentes ───────────────────────────────────────────────────────────────
+function FeatureRow({ ok, text }: { ok: boolean; text: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0' }}>
+      <div style={{
+        width: 18, height: 18, borderRadius: '50%', flexShrink: 0,
+        background: ok ? 'rgba(34,211,160,0.15)' : 'rgba(107,114,128,0.1)',
+        border: `1px solid ${ok ? 'rgba(34,211,160,0.3)' : 'rgba(107,114,128,0.2)'}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 10, color: ok ? 'var(--green)' : 'var(--text3)',
+      }}>
+        {ok ? '✓' : '×'}
+      </div>
+      <span style={{ fontSize: 13, color: ok ? 'var(--text)' : 'var(--text3)' }}>{text}</span>
+    </div>
+  )
 }
-const WAKE = ['hey nexus','ei nexus','oi nexus','ok nexus']
 
-export default function NexusPage() {
-  const { lang, userProfile, geminiKey, calendarEvents, accessToken, showToast, addMessage, chatHistory } = useStore(s=>({
-    lang:s.lang, userProfile:s.userProfile, geminiKey:s.geminiKey,
-    calendarEvents:s.calendarEvents, accessToken:s.accessToken,
-    showToast:s.showToast, addMessage:s.addMessage, chatHistory:s.chatHistory,
+export default function PlansPage() {
+  const { currentPlan, setPlan, showToast } = useStore(s => ({
+    currentPlan: s.currentPlan, setPlan: s.setPlan, showToast: s.showToast,
   }))
+  const [annual, setAnnual] = useState(false)
+  const [checkout, setCheckout] = useState<Plan | null>(null)
+  const [faqOpen, setFaqOpen] = useState<number | null>(null)
 
-  const [state,    setState]   = useState<State>('idle')
-  const [msgs,     setMsgs]    = useState<Msg[]>([{id:uid(),role:'nexus',time:timeStr(),
-    text:`Olá${userProfile?', '+(userProfile.given_name||userProfile.name):''}! Diga "Hey Nexus" ou pressione Espaço.`}])
-  const [live,     setLive]    = useState('')
-  const [input,    setInput]   = useState('')
+  const current = PLANS.find(p => p.id === currentPlan)!
 
-  const recRef   = useRef<any>(null)
-  const wakeRef  = useRef<any>(null)
-  const audioRef = useRef<HTMLAudioElement|null>(null)
-  const synthRef = useRef<SpeechSynthesis|null>(null)
-  const isListen = useRef(false)
-  const stateRef = useRef<State>('idle')
-  const cooldown = useRef(false)
-  const endRef   = useRef<HTMLDivElement>(null)
-
-  useEffect(()=>{ stateRef.current=state },[state])
-  useEffect(()=>{ if(typeof window!=='undefined') synthRef.current=window.speechSynthesis },[])
-  useEffect(()=>{ endRef.current?.scrollIntoView({behavior:'smooth'}) },[msgs])
-
-  // ── Speak ─────────────────────────────────────────────
-  const speak = useCallback(async (text:string) => {
-    setState('speaking')
-    // Try ElevenLabs first
-    if (process.env.NEXT_PUBLIC_USE_ELEVENLABS !== 'false') {
-      try {
-        const res = await fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:cleanSpeak(text)})})
-        if (res.ok) {
-          const blob = await res.blob()
-          const url  = URL.createObjectURL(blob)
-          if(audioRef.current){audioRef.current.pause();URL.revokeObjectURL(audioRef.current.src)}
-          const audio = new Audio(url)
-          audioRef.current = audio
-          audio.onended = ()=>{ setState('idle'); URL.revokeObjectURL(url); setTimeout(startWake,800) }
-          audio.onerror = ()=>{ setState('idle'); browserSpeak(text) }
-          await audio.play(); return
-        }
-      } catch {}
-    }
-    browserSpeak(text)
-  },[])
-
-  const browserSpeak = useCallback((text:string)=>{
-    setState('speaking')
-    const synth = synthRef.current; if(!synth){setState('idle');return}
-    synth.cancel()
-    const u = new SpeechSynthesisUtterance(cleanSpeak(text))
-    u.lang  = lang==='en'?'en-US':'pt-BR'; u.rate=1.05; u.pitch=1; u.volume=0.95
-    const v = synth.getVoices().find(x=>x.lang.startsWith(lang==='en'?'en':'pt')&&x.name.toLowerCase().includes('google'))
-           || synth.getVoices().find(x=>x.lang.startsWith(lang==='en'?'en':'pt'))
-    if(v) u.voice=v
-    u.onend  = ()=>{ setState('idle'); setTimeout(startWake,800) }
-    u.onerror= ()=>  setState('idle')
-    synth.speak(u)
-  },[lang])
-
-  // ── Send to AI ────────────────────────────────────────
-  const sendToAI = useCallback(async (text:string)=>{
-    if(!text.trim()) return
-    setState('thinking'); setLive('')
-    setMsgs(p=>[...p,{id:uid(),role:'user',text,time:timeStr()}])
-    const cal = calendarEvents.slice(0,8).map(e=>`${e.summary} (${e.start.dateTime||e.start.date})`).join(', ')
-    try {
-      const res = await fetch('/api/chat',{
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          messages:[...chatHistory,{role:'user',content:text}],
-          userName: userProfile?.given_name||userProfile?.name,
-          lang, calendarContext:cal, geminiKey, voiceMode:true,
-          userEmail: userProfile?.email,
-          accessToken,
-        })
-      })
-      const data = await res.json()
-      const reply = data.reply||'Não consegui processar.'
-      let tag = ''
-      if(data.noteCreated)  tag='📝 Nota salva!'
-      if(data.eventCreated) tag='📅 Evento criado!'
-      setMsgs(p=>[...p,{id:uid(),role:'nexus',text:reply,time:timeStr(),tag}])
-      addMessage({role:'user',content:text})
-      addMessage({role:'assistant',content:reply})
-      if(tag) showToast(tag)
-      speak(reply)
-    } catch {
-      const err='Erro de conexão.'
-      setMsgs(p=>[...p,{id:uid(),role:'nexus',text:err,time:timeStr()}])
-      speak(err)
-    }
-  },[calendarEvents,chatHistory,userProfile,lang,geminiKey,accessToken,speak,addMessage,showToast])
-
-  // ── Stop listening ────────────────────────────────────
-  const stopListen = useCallback(()=>{
-    isListen.current=false
-    try{recRef.current?.stop()}catch{}
-    recRef.current=null
-    if(stateRef.current==='listening') setState('idle')
-    setLive('')
-  },[])
-
-  // ── Start listening ───────────────────────────────────
-  const startListen = useCallback(()=>{
-    const SR=(window as any).SpeechRecognition||(window as any).webkitSpeechRecognition
-    if(!SR){showToast('Use Chrome para reconhecimento de voz.');return}
-    if(isListen.current||stateRef.current!=='idle') return
-    audioRef.current?.pause()
-    synthRef.current?.cancel()
-    try{wakeRef.current?.stop()}catch{}
-    wakeRef.current=null
-
-    setTimeout(()=>{
-      const rec=new SR()
-      rec.lang=lang==='en'?'en-US':'pt-BR'
-      rec.continuous=false; rec.interimResults=true
-      rec.onstart =()=>{ setState('listening'); isListen.current=true }
-      rec.onresult=(e:any)=>{
-        const t=Array.from(e.results).map((r:any)=>r[0].transcript).join('')
-        // Remove wake word from transcript
-        let clean=t
-        WAKE.forEach(w=>{clean=clean.toLowerCase().replace(w,'').trim()})
-        setLive(clean||t)
-        if(e.results[e.results.length-1].isFinal){
-          stopListen()
-          const toSend=(clean||t).trim()
-          if(toSend.length>1) sendToAI(toSend)
-        }
+  function handleSelect(plan: Plan) {
+    if (plan === currentPlan) { showToast('Você já está neste plano!'); return }
+    if (plan === 'free') {
+      if (confirm('Fazer downgrade para Free? Você perderá acesso às funcionalidades Pro.')) {
+        setPlan('free'); showToast('Plano alterado para Free.')
       }
-      rec.onerror=(e:any)=>{
-        stopListen()
-        if(e.error==='not-allowed') showToast('Permita o microfone nas configurações.')
-        else if(e.error!=='no-speech'&&e.error!=='aborted') showToast('Erro mic: '+e.error)
-      }
-      rec.onend=()=>{ if(isListen.current) stopListen() }
-      recRef.current=rec
-      try{rec.start()}catch{showToast('Erro ao iniciar microfone.')}
-    },350)
-  },[lang,sendToAI,showToast,stopListen])
-
-  // ── Wake word ─────────────────────────────────────────
-  const startWake = useCallback(()=>{
-    const SR=(window as any).SpeechRecognition||(window as any).webkitSpeechRecognition
-    if(!SR||isListen.current||cooldown.current) return
-    try{wakeRef.current?.stop()}catch{}
-    const rec=new SR()
-    rec.lang=lang==='en'?'en-US':'pt-BR'
-    rec.continuous=true; rec.interimResults=true
-    rec.onresult=(e:any)=>{
-      if(isListen.current||stateRef.current!=='idle'||cooldown.current) return
-      const t=Array.from(e.results).map((r:any)=>r[0].transcript).join('').toLowerCase()
-      if(WAKE.some(w=>t.includes(w))){
-        cooldown.current=true
-        try{rec.stop()}catch{}
-        wakeRef.current=null
-        setTimeout(()=>{
-          cooldown.current=false
-          startListen()
-        },500)
-      }
+      return
     }
-    rec.onend=()=>{ wakeRef.current=null; if(!isListen.current&&!cooldown.current) setTimeout(startWake,2000) }
-    rec.onerror=()=>{ wakeRef.current=null; setTimeout(startWake,3000) }
-    wakeRef.current=rec
-    try{rec.start()}catch{}
-  },[lang,startListen])
-
-  useEffect(()=>{
-    const t=setTimeout(startWake,1500)
-    return ()=>{
-      clearTimeout(t)
-      try{wakeRef.current?.stop()}catch{}
-      try{recRef.current?.stop()}catch{}
-      audioRef.current?.pause()
-      synthRef.current?.cancel()
-    }
-  },[])
-
-  // ── Keyboard ──────────────────────────────────────────
-  useEffect(()=>{
-    const onKey=(e:KeyboardEvent)=>{
-      const tag=(e.target as HTMLElement).tagName
-      if(e.code==='Space'&&!['INPUT','TEXTAREA','SELECT'].includes(tag)){
-        e.preventDefault()
-        if(stateRef.current==='idle')      startListen()
-        else if(stateRef.current==='listening') stopListen()
-      }
-      if(e.code==='Escape'){
-        stopListen()
-        audioRef.current?.pause()
-        synthRef.current?.cancel()
-        setState('idle')
-      }
-    }
-    window.addEventListener('keydown',onKey)
-    return ()=>window.removeEventListener('keydown',onKey)
-  },[startListen,stopListen])
-
-  function handleMic(){
-    if(state==='speaking'){ audioRef.current?.pause(); synthRef.current?.cancel(); setState('idle'); setTimeout(startWake,500); return }
-    if(state==='listening'){ stopListen(); return }
-    if(state==='idle') startListen()
+    setCheckout(plan)
   }
 
-  async function handleSend(){
-    if(!input.trim()) return
-    const t=input.trim(); setInput(''); await sendToAI(t)
+  function activateDemo(plan: Plan) {
+    setPlan(plan)
+    setCheckout(null)
+    showToast(`🎉 Plano ${PLANS.find(p => p.id === plan)?.badge} ativado!`)
   }
 
-  const col = COLORS[state]
+  function getPrice(plan: typeof PLANS[0]) {
+    if (plan.monthlyPrice === 0) return 'Grátis'
+    return annual
+      ? `R$ ${(plan.annualPrice / 12).toFixed(2)}`
+      : `R$ ${plan.monthlyPrice.toFixed(2)}`
+  }
+
+  const checkoutPlan = PLANS.find(p => p.id === checkout)
 
   return (
     <AppShell>
-      <div style={{flex:1,display:'flex',flexDirection:'column',height:'100%',background:'var(--bg)',overflow:'hidden'}}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px 48px' }}>
 
         {/* Header */}
-        <div style={{padding:'12px 24px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
-          <div style={{display:'flex',alignItems:'center',gap:10}}>
-            <div style={{width:8,height:8,borderRadius:'50%',background:col,boxShadow:`0 0 8px ${col}`,animation:state!=='idle'?'pulse 1s infinite':'none'}}/>
-            <span style={{fontFamily:'Syne',fontSize:15,fontWeight:700}}>Nexus · Assistente</span>
-            <span style={{fontSize:11,color:'var(--text3)',background:'var(--bg3)',padding:'2px 8px',borderRadius:99,border:'1px solid var(--border)'}}>🎙️ "Hey Nexus"</span>
+        <div style={{ textAlign: 'center', marginBottom: 32 }}>
+          <div style={{ fontFamily: 'Syne', fontSize: 28, fontWeight: 800, marginBottom: 8 }}>
+            Escolha seu plano
           </div>
-          <div style={{fontSize:11,color:col,fontWeight:600}}>
-            {state==='idle'&&'Aguardando...'}
-            {state==='listening'&&'🔴 Ouvindo...'}
-            {state==='thinking'&&'⚙️ Pensando...'}
-            {state==='speaking'&&'🔊 Falando...'}
+          <div style={{ fontSize: 14, color: 'var(--text2)' }}>
+            Comece grátis. Faça upgrade quando precisar.
           </div>
         </div>
 
-        {/* Messages */}
-        <div style={{flex:1,overflowY:'auto',padding:'20px 28px',display:'flex',flexDirection:'column',gap:14}}>
-          {msgs.map(m=>(
-            <div key={m.id} style={{display:'flex',flexDirection:'column',alignItems:m.role==='user'?'flex-end':'flex-start',gap:4}}>
-              {m.role==='nexus'&&(
-                <div style={{display:'flex',alignItems:'center',gap:6,marginLeft:4}}>
-                  <div style={{width:20,height:20,borderRadius:'50%',background:'linear-gradient(135deg,#7c6dfa,#a78bfa)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'#fff',fontWeight:700}}>N</div>
-                  <span style={{fontSize:10,color:'var(--accent2)',fontWeight:700,letterSpacing:1}}>NEXUS</span>
-                  <span style={{fontSize:10,color:'var(--text3)'}}>{m.time}</span>
-                  {m.tag&&<span style={{fontSize:10,color:'var(--green)',background:'rgba(34,211,160,0.1)',padding:'1px 6px',borderRadius:99,border:'1px solid rgba(34,211,160,0.2)'}}>{m.tag}</span>}
+        {/* Banner plano atual */}
+        <div style={{
+          background: 'var(--bg2)',
+          border: `1px solid ${current.color === 'var(--text2)' ? 'var(--border)' : current.color + '30'}`,
+          borderRadius: 'var(--radius)', padding: '14px 20px',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginBottom: 28,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 600, letterSpacing: 0.8 }}>PLANO ATUAL</div>
+            <div style={{ fontFamily: 'Syne', fontSize: 16, fontWeight: 700, color: current.color }}>{current.badge}</div>
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--text2)' }}>
+            {currentPlan === 'free' && '50 msgs/dia · 3 hábitos · sem WhatsApp'}
+            {currentPlan === 'pro' && '✅ IA ilimitada · Voz neural · WhatsApp'}
+            {currentPlan === 'business' && '✅ Todos os recursos · Multi-usuário · API'}
+          </div>
+        </div>
+
+        {/* Toggle anual */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14, marginBottom: 28 }}>
+          <span style={{ fontSize: 14, color: annual ? 'var(--text2)' : 'var(--text)', fontWeight: annual ? 400 : 600 }}>Mensal</span>
+          <div
+            onClick={() => setAnnual(!annual)}
+            style={{
+              width: 46, height: 26, borderRadius: 99, cursor: 'pointer', position: 'relative',
+              background: annual ? 'var(--accent)' : 'var(--bg3)',
+              border: '1px solid var(--border2)', transition: 'background 0.2s',
+            }}
+          >
+            <div style={{
+              position: 'absolute', top: 3, left: annual ? 22 : 3,
+              width: 18, height: 18, borderRadius: '50%', background: '#fff',
+              transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+            }} />
+          </div>
+          <span style={{ fontSize: 14, color: annual ? 'var(--text)' : 'var(--text2)', fontWeight: annual ? 600 : 400 }}>
+            Anual{' '}
+            <span style={{
+              fontSize: 11, fontWeight: 700, background: 'rgba(34,211,160,0.15)',
+              color: 'var(--green)', border: '1px solid rgba(34,211,160,0.25)',
+              borderRadius: 99, padding: '2px 8px', marginLeft: 4,
+            }}>-33%</span>
+          </span>
+        </div>
+
+        {/* Cards */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 40 }}>
+          {PLANS.map(plan => {
+            const isCurrentPlan = plan.id === currentPlan
+            return (
+              <div key={plan.id} style={{
+                background: 'var(--bg2)',
+                border: `1px solid ${plan.popular ? 'rgba(124,109,250,0.5)' : isCurrentPlan ? 'rgba(34,211,160,0.3)' : 'var(--border)'}`,
+                borderRadius: 'var(--radius)', padding: '24px 22px',
+                position: 'relative',
+                boxShadow: plan.popular ? '0 0 40px rgba(124,109,250,0.08)' : 'none',
+              }}>
+                {plan.popular && (
+                  <div style={{
+                    position: 'absolute', top: -1, left: '50%', transform: 'translateX(-50%)',
+                    background: 'var(--accent)', color: '#fff', fontSize: 10, fontWeight: 700,
+                    padding: '3px 14px', borderRadius: '0 0 10px 10px', letterSpacing: 0.8,
+                  }}>MAIS POPULAR</div>
+                )}
+                {isCurrentPlan && (
+                  <div style={{
+                    position: 'absolute', top: 14, right: 14,
+                    background: 'rgba(34,211,160,0.15)', color: 'var(--green)',
+                    border: '1px solid rgba(34,211,160,0.25)',
+                    fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 99,
+                  }}>✓ ATUAL</div>
+                )}
+
+                <div style={{ fontFamily: 'Syne', fontSize: 18, fontWeight: 800, color: plan.color, marginBottom: 6 }}>
+                  {plan.label}
+                </div>
+
+                <div style={{ marginBottom: 20 }}>
+                  <span style={{ fontFamily: 'Syne', fontSize: 34, fontWeight: 900 }}>
+                    {getPrice(plan)}
+                  </span>
+                  {plan.monthlyPrice > 0 && (
+                    <span style={{ fontSize: 13, color: 'var(--text3)' }}>
+                      {annual ? '/mês (faturado anual)' : '/mês'}
+                    </span>
+                  )}
+                  {annual && plan.monthlyPrice > 0 && (
+                    <div style={{ fontSize: 12, color: 'var(--green)', marginTop: 4 }}>
+                      Total: R$ {plan.annualPrice}/ano (economize R$ {(plan.monthlyPrice * 12 - plan.annualPrice).toFixed(0)})
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ marginBottom: 22 }}>
+                  {plan.features.map((f, i) => <FeatureRow key={i} {...f} />)}
+                </div>
+
+                <button
+                  onClick={() => handleSelect(plan.id)}
+                  style={{
+                    width: '100%', padding: '13px 0', borderRadius: 10, fontSize: 14,
+                    fontWeight: 700, cursor: isCurrentPlan ? 'default' : 'pointer',
+                    border: 'none', transition: 'all 0.2s',
+                    background: isCurrentPlan
+                      ? 'var(--bg3)'
+                      : plan.id === 'pro'
+                      ? 'var(--accent)'
+                      : plan.id === 'business'
+                      ? 'linear-gradient(135deg,#f59e0b,#d97706)'
+                      : 'var(--bg3)',
+                    color: isCurrentPlan ? 'var(--text3)' : plan.id === 'free' ? 'var(--text2)' : '#fff',
+                  }}
+                >
+                  {isCurrentPlan ? '✓ Plano atual' : plan.cta}
+                </button>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Garantia */}
+        <div style={{
+          textAlign: 'center', padding: '28px 24px',
+          background: 'linear-gradient(135deg,rgba(34,211,160,0.07),rgba(34,211,160,0.02))',
+          border: '1px solid rgba(34,211,160,0.15)', borderRadius: 'var(--radius)', marginBottom: 36,
+        }}>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>🛡️</div>
+          <div style={{ fontFamily: 'Syne', fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Garantia de 14 dias sem risco</div>
+          <div style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, maxWidth: 400, margin: '0 auto' }}>
+            Experimente qualquer plano por 14 dias. Se não ficar satisfeito por qualquer motivo, devolvemos 100% do valor — sem burocracia e sem perguntas.
+          </div>
+        </div>
+
+        {/* FAQ */}
+        <div style={{ maxWidth: 640, margin: '0 auto' }}>
+          <div style={{ fontFamily: 'Syne', fontSize: 18, fontWeight: 700, textAlign: 'center', marginBottom: 20 }}>
+            Perguntas frequentes
+          </div>
+          {FAQS.map((faq, i) => (
+            <div key={i} style={{
+              borderBottom: '1px solid var(--border)', overflow: 'hidden',
+            }}>
+              <button
+                onClick={() => setFaqOpen(faqOpen === i ? null : i)}
+                style={{
+                  width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '16px 0', background: 'transparent', border: 'none',
+                  cursor: 'pointer', textAlign: 'left',
+                }}
+              >
+                <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>{faq.q}</span>
+                <span style={{
+                  fontSize: 18, color: 'var(--text3)', flexShrink: 0, marginLeft: 12,
+                  transform: faqOpen === i ? 'rotate(45deg)' : 'none', transition: 'transform 0.2s',
+                }}>+</span>
+              </button>
+              {faqOpen === i && (
+                <div style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.7, paddingBottom: 16 }}>
+                  {faq.a}
                 </div>
               )}
-              <div style={{maxWidth:'72%',padding:'12px 16px',fontSize:14,lineHeight:1.65,
-                borderRadius:m.role==='user'?'18px 18px 4px 18px':'18px 18px 18px 4px',
-                background:m.role==='user'?'linear-gradient(135deg,#7c6dfa,#a78bfa)':'var(--bg2)',
-                border:m.role==='user'?'none':'1px solid var(--border)',
-                color:'var(--text)'}}>
-                {m.text}
-              </div>
-              {m.role==='user'&&<span style={{fontSize:10,color:'var(--text3)',marginRight:4}}>{m.time}</span>}
             </div>
           ))}
-          {live&&(
-            <div style={{display:'flex',justifyContent:'flex-end'}}>
-              <div style={{maxWidth:'72%',padding:'10px 16px',borderRadius:'18px 18px 4px 18px',background:'rgba(124,109,250,0.1)',border:'1px dashed rgba(124,109,250,0.4)',color:'var(--text2)',fontSize:13,fontStyle:'italic'}}>{live}...</div>
-            </div>
-          )}
-          {state==='thinking'&&(
-            <div style={{display:'flex',alignItems:'center',gap:8}}>
-              <div style={{width:20,height:20,borderRadius:'50%',background:'linear-gradient(135deg,#7c6dfa,#a78bfa)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'#fff',fontWeight:700}}>N</div>
-              <div style={{padding:'10px 16px',background:'var(--bg2)',borderRadius:'18px 18px 18px 4px',border:'1px solid var(--border)',display:'flex',gap:4,alignItems:'center'}}>
-                {[0,120,240].map((d,i)=><div key={i} style={{width:6,height:6,borderRadius:'50%',background:'var(--accent2)',animation:`bounce 1s ${d}ms infinite`}}/>)}
-              </div>
-            </div>
-          )}
-          <div ref={endRef}/>
-        </div>
-
-        {/* Controls */}
-        <div style={{flexShrink:0,padding:'14px 24px 20px',borderTop:'1px solid var(--border)',background:'var(--bg)'}}>
-          {/* Waves */}
-          <div style={{height:28,display:'flex',gap:2,alignItems:'center',justifyContent:'center',marginBottom:12,opacity:state!=='idle'?1:0,transition:'opacity 0.3s'}}>
-            {Array.from({length:22}).map((_,i)=>(
-              <div key={i} style={{width:3,borderRadius:99,background:col,animation:`wave ${0.4+Math.sin(i)*0.15}s ${i*0.04}s ease-in-out infinite`}}/>
-            ))}
-          </div>
-          {/* Input */}
-          <div style={{display:'flex',gap:10,alignItems:'flex-end'}}>
-            <textarea rows={1} value={input} onChange={e=>setInput(e.target.value)}
-              onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend()}}}
-              placeholder="Digite ou use voz... (Enter envia)"
-              style={{flex:1,background:'var(--bg2)',border:'1px solid var(--border2)',borderRadius:12,padding:'11px 14px',color:'var(--text)',fontSize:14,outline:'none',resize:'none',minHeight:44,maxHeight:100,fontFamily:'DM Sans'}}
-            />
-            <button onClick={handleMic} style={{
-              width:52,height:52,borderRadius:'50%',border:'none',cursor:'pointer',flexShrink:0,
-              background:`radial-gradient(circle at 35% 35%,${col},${col}99)`,
-              boxShadow:state!=='idle'?`0 0 0 6px ${col}33,0 0 24px ${col}66`:`0 4px 16px ${col}66`,
-              display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.25s',
-              animation:state==='listening'?'micPulse 1.2s ease-in-out infinite':'none',
-            }}>
-              {state==='speaking'?<svg width="20" height="20" viewBox="0 0 24 24" fill="white"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
-              :state==='thinking'?<div style={{width:20,height:20,border:'2.5px solid rgba(255,255,255,0.3)',borderTopColor:'#fff',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
-              :<svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="white" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>}
-            </button>
-            <button onClick={handleSend} disabled={!input.trim()} style={{width:42,height:42,borderRadius:10,background:input.trim()?'var(--accent)':'var(--bg3)',border:'1px solid var(--border)',cursor:input.trim()?'pointer':'not-allowed',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,opacity:input.trim()?1:0.4}}>
-              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="white" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-            </button>
-          </div>
-          {/* Quick */}
-          <div style={{display:'flex',gap:6,marginTop:10,flexWrap:'wrap'}}>
-            {[
-              ['📅 Agenda hoje','O que tenho na agenda hoje?'],
-              ['📝 Anota ideia','Anota: '],
-              ['✅ Cria tarefa','Cria tarefa: '],
-              ['⏰ Lembrete','Me lembra de '],
-              ['🧠 Resumo','Me dá um resumo da minha semana'],
-            ].map(([l,v])=>(
-              <button key={l as string} onClick={()=>{ if((v as string).endsWith(': ')||v==='Me lembra de '){ setInput(v as string) }else{ sendToAI(v as string) } }}
-                style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:99,padding:'4px 12px',fontSize:11,color:'var(--text2)',cursor:'pointer',transition:'all 0.15s'}}
-                onMouseEnter={e=>{e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.color='var(--accent2)'}}
-                onMouseLeave={e=>{e.currentTarget.style.borderColor='var(--border)';e.currentTarget.style.color='var(--text2)'}}>
-                {l}
-              </button>
-            ))}
-          </div>
         </div>
       </div>
-      <style>{`
-        @keyframes bounce{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-4px)}}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
-        @keyframes wave{0%,100%{height:4px}50%{height:22px}}
-        @keyframes spin{to{transform:rotate(360deg)}}
-        @keyframes micPulse{0%,100%{box-shadow:0 0 0 0 rgba(248,113,113,0.4)}50%{box-shadow:0 0 0 12px rgba(248,113,113,0)}}
-      `}</style>
+
+      {/* Modal checkout */}
+      {checkout && checkoutPlan && (
+        <div
+          onClick={e => e.target === e.currentTarget && setCheckout(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)',
+            backdropFilter: 'blur(4px)', zIndex: 200,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+          }}
+        >
+          <div style={{
+            background: 'var(--bg2)', border: '1px solid var(--border2)',
+            borderRadius: 'var(--radius)', padding: '32px 28px', width: '100%', maxWidth: 420,
+          }}>
+            <div style={{ textAlign: 'center', marginBottom: 24 }}>
+              <div style={{ fontSize: 40, marginBottom: 8 }}>{checkout === 'pro' ? '⭐' : '🚀'}</div>
+              <div style={{ fontFamily: 'Syne', fontSize: 22, fontWeight: 800, marginBottom: 4 }}>
+                Plano {checkoutPlan.label}
+              </div>
+              <div style={{ fontFamily: 'Syne', fontSize: 28, fontWeight: 800, color: checkoutPlan.color }}>
+                {annual
+                  ? `R$ ${checkoutPlan.annualPrice}/ano`
+                  : `R$ ${checkoutPlan.monthlyPrice.toFixed(2)}/mês`}
+              </div>
+              {annual && (
+                <div style={{ fontSize: 13, color: 'var(--green)', marginTop: 4 }}>
+                  Equivale a R$ {(checkoutPlan.annualPrice / 12).toFixed(2)}/mês
+                </div>
+              )}
+            </div>
+
+            <div style={{
+              background: 'rgba(34,211,160,0.07)', border: '1px solid rgba(34,211,160,0.2)',
+              borderRadius: 10, padding: '12px 16px', marginBottom: 20,
+              fontSize: 13, color: 'var(--text2)', lineHeight: 1.6,
+            }}>
+              🛡️ <b style={{ color: 'var(--text)' }}>Garantia de 14 dias</b> — não gostou? Devolvemos 100%.
+            </div>
+
+            {/* Botões de pagamento */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+              <button
+                onClick={() => activateDemo(checkout)}
+                style={{
+                  padding: '13px 0', borderRadius: 10, border: 'none',
+                  background: 'var(--accent)', color: '#fff', fontSize: 14,
+                  fontWeight: 700, cursor: 'pointer',
+                }}
+              >
+                💳 Pagar com cartão (Stripe)
+              </button>
+              <button
+                onClick={() => activateDemo(checkout)}
+                style={{
+                  padding: '13px 0', borderRadius: 10, border: 'none',
+                  background: '#009ee3', color: '#fff', fontSize: 14,
+                  fontWeight: 700, cursor: 'pointer',
+                }}
+              >
+                💙 Pagar com Mercado Pago
+              </button>
+              <button
+                onClick={() => activateDemo(checkout)}
+                style={{
+                  padding: '13px 0', borderRadius: 10, border: 'none',
+                  background: 'linear-gradient(135deg,#32bcad,#1a9488)', color: '#fff', fontSize: 14,
+                  fontWeight: 700, cursor: 'pointer',
+                }}
+              >
+                📱 Pagar com PIX
+              </button>
+            </div>
+
+            <div style={{
+              fontSize: 11, color: 'var(--text3)', textAlign: 'center', lineHeight: 1.5, marginBottom: 16,
+            }}>
+              Configure <code>STRIPE_KEY</code> ou <code>MP_PUBLIC_KEY</code> no Vercel para ativar pagamentos reais.
+              No momento, o botão ativa o plano em modo demo.
+            </div>
+
+            <button
+              onClick={() => setCheckout(null)}
+              style={{
+                width: '100%', padding: '10px 0', borderRadius: 10,
+                background: 'transparent', border: '1px solid var(--border)',
+                color: 'var(--text2)', fontSize: 13, cursor: 'pointer',
+              }}
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
     </AppShell>
   )
 }

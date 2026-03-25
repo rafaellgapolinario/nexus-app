@@ -1,337 +1,344 @@
 'use client'
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { useStore } from '@/lib/store'
+import { t, type TKey } from '@/lib/translations'
 import { AppShell } from '@/components/AppShell'
+import { JarvisOverlay, speakText, useSpeechRecognition } from '@/components/JarvisOverlay'
 
-interface Msg { id: string; role: 'user' | 'nexus'; text: string; time: string }
-type JState = 'idle' | 'listening' | 'thinking' | 'speaking'
+// ── Tipos ─────────────────────────────────────────────────────────────────────
+type Intent = 'chat' | 'note' | 'habit' | 'finance' | 'event'
 
-function uid() { return Math.random().toString(36).slice(2) }
-function nowStr() { return new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) }
-function cleanTTS(t: string) {
-  return t.replace(/\*\*(.*?)\*\*/g,'$1').replace(/\*(.*?)\*/g,'$1').replace(/#{1,6}\s/g,'')
-    .replace(/[⚡🤖📅💬⏰☀️📊🔥💡🎉🛡️⭐🚀💳🧠⚙️🔒✅❌📋🗓🎙️]/g,'').substring(0,400)
+interface ApiResponse {
+  reply: string
+  type?: Intent
+  data?: Record<string, unknown>
+  audioBase64?: string
+  text?: string           // SSE chunk
 }
 
-const STATE_CFG = {
-  idle:      { color: '#7c6dfa', glow: 'rgba(124,109,250,0.4)', label: 'Diga "Hey Nexus" ou pressione Espaço' },
-  listening: { color: '#f87171', glow: 'rgba(248,113,113,0.5)', label: 'Ouvindo...' },
-  thinking:  { color: '#f59e0b', glow: 'rgba(245,158,11,0.5)',  label: 'Pensando...' },
-  speaking:  { color: '#22d3a0', glow: 'rgba(34,211,160,0.5)',  label: 'Nexus falando...' },
+// ── Chips de sugestão ─────────────────────────────────────────────────────────
+type ChipLang = { pt: string; en: string; es: string }
+const CHIPS: { key: TKey; msg: ChipLang }[] = [
+  { key: 'chip_today',      msg: { pt: 'O que tenho na agenda hoje?',           en: "What's on my calendar today?",  es: '¿Qué tengo hoy?' } },
+  { key: 'chip_meeting',    msg: { pt: 'Marcar reunião com equipe sexta às 15h', en: 'Schedule team meeting Friday 3pm', es: 'Reunión equipo viernes 15h' } },
+  { key: 'chip_productivity',msg:{ pt: 'Dicas para ser mais produtivo hoje',     en: 'Tips to be more productive today', es: 'Consejos productividad hoy' } },
+  { key: 'chip_upcoming',   msg: { pt: 'Meus próximos 5 eventos',                en: 'My next 5 events',               es: 'Mis próximos 5 eventos' } },
+  { key: 'chip_habit',      msg: { pt: 'Quero criar hábito de meditar 10min',   en: 'Create habit: meditate 10min',   es: 'Hábito: meditar 10min' } },
+  { key: 'chip_finance',    msg: { pt: 'Gastei R$45 no almoço hoje',             en: 'I spent $45 on lunch today',     es: 'Gasté $45 en almuerzo hoy' } },
+]
+
+// ── Ícone de intent ───────────────────────────────────────────────────────────
+function IntentBadge({ type }: { type?: Intent }) {
+  const map: Record<string, string> = { note: '📝', habit: '🎯', finance: '💸', event: '📅', chat: '' }
+  const label: Record<string, string> = { note: 'Nota', habit: 'Hábito', finance: 'Finança', event: 'Evento', chat: '' }
+  if (!type || type === 'chat') return null
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+      color: 'var(--accent2)', background: 'rgba(124,109,250,0.1)',
+      border: '1px solid rgba(124,109,250,0.2)',
+      borderRadius: 99, padding: '2px 8px', marginBottom: 6,
+    }}>
+      {map[type]} {label[type].toUpperCase()}
+    </span>
+  )
 }
 
-const WAKE_PHRASES = ['hey nexus','ei nexus','nexus','oi nexus','ok nexus','nexus,']
-
-export default function JarvisPage() {
-  const { lang, userProfile, geminiKey, calendarEvents, showToast, addMessage, chatHistory } = useStore(s => ({
-    lang: s.lang, userProfile: s.userProfile, geminiKey: s.geminiKey,
-    calendarEvents: s.calendarEvents, showToast: s.showToast,
-    addMessage: s.addMessage, chatHistory: s.chatHistory,
+// ── Componente principal ──────────────────────────────────────────────────────
+export default function AgentPage() {
+  const {
+    lang, accessToken, userProfile, geminiKey,
+    calendarEvents, addMessage, chatHistory, showToast,
+  } = useStore(s => ({
+    lang: s.lang, accessToken: s.accessToken, userProfile: s.userProfile,
+    geminiKey: s.geminiKey, calendarEvents: s.calendarEvents,
+    addMessage: s.addMessage, chatHistory: s.chatHistory, showToast: s.showToast,
   }))
 
-  const [jState,    setJState]    = useState<JState>('idle')
-  const [messages,  setMessages]  = useState<Msg[]>([{
-    id: uid(), role: 'nexus', time: nowStr(),
-    text: `Olá${userProfile ? ', ' + (userProfile.given_name || userProfile.name) : ''}! Sou o Nexus. Diga "Hey Nexus" ou pressione Espaço para começar.`,
-  }])
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [streaming, setStreaming] = useState('')       // texto sendo streamado
+  const [jarvis, setJarvis] = useState(false)
+  const [voiceStatus, setVoiceStatus] = useState('Ouvindo...')
   const [transcript, setTranscript] = useState('')
-  const [inputText,  setInputText]  = useState('')
+  const [ttsEnabled] = useState(() => !!process.env.NEXT_PUBLIC_AZURE_TTS_ENABLED)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const speakingRef = useRef(false)
 
-  const recRef      = useRef<any>(null)
-  const wakeRef     = useRef<any>(null)
-  const synthRef    = useRef<SpeechSynthesis | null>(null)
-  const listeningR  = useRef(false)
-  const jStateRef   = useRef<JState>('idle')
-  const endRef      = useRef<HTMLDivElement>(null)
+  const calendarContext = calendarEvents.slice(0, 5)
+    .map(ev => `${ev.summary} (${ev.start.dateTime || ev.start.date})`).join(', ')
 
-  useEffect(() => { jStateRef.current = jState }, [jState])
-  useEffect(() => { if (typeof window !== 'undefined') synthRef.current = window.speechSynthesis }, [])
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatHistory, loading, streaming])
 
-  // ── TTS ─────────────────────────────────────────────────────────
-  const speak = useCallback((text: string) => {
-    if (!synthRef.current) return
-    synthRef.current.cancel()
-    setJState('speaking')
-    const u = new SpeechSynthesisUtterance(cleanTTS(text))
-    u.lang    = lang === 'en' ? 'en-US' : lang === 'es' ? 'es-ES' : 'pt-BR'
-    u.rate    = 1.05; u.pitch = 1.0; u.volume = 0.95
-    const voices = synthRef.current.getVoices()
-    const pref = voices.find(v => v.lang.startsWith(lang === 'en' ? 'en' : lang === 'es' ? 'es' : 'pt') && v.name.toLowerCase().includes('google'))
-      || voices.find(v => v.lang.startsWith(lang === 'en' ? 'en' : lang === 'es' ? 'es' : 'pt'))
-    if (pref) u.voice = pref
-    u.onend = () => { setJState('idle'); setTimeout(() => restartWake(), 500) }
-    u.onerror = () => setJState('idle')
-    synthRef.current.speak(u)
-  }, [lang])
-
-  // ── AI Call ──────────────────────────────────────────────────────
-  const sendToAI = useCallback(async (text: string) => {
+  // ── Enviar mensagem ─────────────────────────────────────────────────────────
+  const sendMsg = useCallback(async (text: string, fromVoice = false) => {
     if (!text.trim()) return
-    setJState('thinking')
-    setTranscript('')
-    setMessages(prev => [...prev, { id: uid(), role: 'user', text, time: nowStr() }])
-    const calCtx = calendarEvents.slice(0,5).map(ev => `${ev.summary} (${ev.start.dateTime||ev.start.date})`).join(', ')
+    setInput('')
+    addMessage({ role: 'user', content: text })
+    setLoading(true)
+    setStreaming('')
+
     try {
       const res = await fetch('/api/chat', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: [...chatHistory, { role: 'user', content: text }],
-          userName: userProfile?.given_name || userProfile?.name,
-          lang, calendarContext: calCtx, geminiKey,
-          systemExtra: 'Modo Jarvis: respostas MUITO curtas (1-2 frases máx). Sem markdown, sem listas. Direto ao ponto como um assistente pessoal sofisticado.',
+          userName: userProfile?.given_name,
+          lang, calendarContext, geminiKey, accessToken,
+          voiceMode: fromVoice,
+          ttsEnabled: fromVoice && ttsEnabled,
         }),
       })
-      const data = await res.json()
-      const reply = data.reply || 'Não consegui processar isso agora.'
-      setMessages(prev => [...prev, { id: uid(), role: 'nexus', text: reply, time: nowStr() }])
-      addMessage({ role: 'user', content: text })
-      addMessage({ role: 'assistant', content: reply })
-      speak(reply)
+
+      // Streaming SSE
+      const contentType = res.headers.get('content-type') || ''
+      if (contentType.includes('text/event-stream')) {
+        const reader = res.body!.getReader()
+        const decoder = new TextDecoder()
+        let full = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const chunk = decoder.decode(value)
+          for (const line of chunk.split('\n')) {
+            if (line.startsWith('data: ')) {
+              try {
+                const { text: t } = JSON.parse(line.slice(6))
+                if (t) { full += t; setStreaming(full) }
+              } catch {}
+            }
+          }
+        }
+        addMessage({ role: 'assistant', content: full })
+        setStreaming('')
+        if (fromVoice && !speakingRef.current) {
+          speakingRef.current = true
+          await speakText(full, ttsEnabled)
+          speakingRef.current = false
+        }
+      } else {
+        // JSON normal
+        const data: ApiResponse = await res.json()
+        if (data.reply) {
+          addMessage({ role: 'assistant', content: data.reply, meta: { type: data.type, data: data.data } as any })
+          if (fromVoice) {
+            if (data.audioBase64 && !speakingRef.current) {
+              // TTS já veio pronto da API
+              speakingRef.current = true
+              const binary = atob(data.audioBase64)
+              const bytes = new Uint8Array(binary.length)
+              for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+              const blob = new Blob([bytes], { type: 'audio/mp3' })
+              const url = URL.createObjectURL(blob)
+              const audio = new Audio(url)
+              audio.onended = () => { URL.revokeObjectURL(url); speakingRef.current = false }
+              audio.play().catch(() => { speakingRef.current = false })
+            } else if (!speakingRef.current) {
+              speakingRef.current = true
+              await speakText(data.reply, ttsEnabled)
+              speakingRef.current = false
+            }
+          }
+        } else {
+          showToast(t(lang, 'err_connect'))
+        }
+      }
     } catch {
-      const err = 'Erro de conexão. Tente novamente.'
-      setMessages(prev => [...prev, { id: uid(), role: 'nexus', text: err, time: nowStr() }])
-      speak(err)
+      showToast(t(lang, 'err_connect'))
     }
-  }, [calendarEvents, chatHistory, userProfile, lang, geminiKey, speak, addMessage])
+    setLoading(false)
+  }, [chatHistory, lang, calendarContext, geminiKey, accessToken, ttsEnabled, userProfile, addMessage, showToast])
 
-  // ── Stop Listening ───────────────────────────────────────────────
-  const stopListening = useCallback(() => {
-    listeningR.current = false
-    if (recRef.current) { try { recRef.current.stop() } catch {} recRef.current = null }
-    if (jStateRef.current === 'listening') setJState('idle')
+  // ── STT ─────────────────────────────────────────────────────────────────────
+  const { start: startRec, stop: stopRec } = useSpeechRecognition({
+    lang,
+    onFinal: useCallback((text: string) => {
+      setTranscript(text)
+      setVoiceStatus('Processando...')
+      setJarvis(false)
+      stopRec()
+      sendMsg(text, true)
+    }, [sendMsg, stopRec]),
+    onInterim: useCallback((t: string) => setTranscript(t), []),
+    onError: useCallback((err: string) => {
+      if (err === 'not_supported') showToast('Microfone não suportado neste navegador')
+      setJarvis(false)
+    }, [showToast]),
+  })
+
+  const stopVoice = useCallback(() => {
+    setJarvis(false)
+    stopRec()
     setTranscript('')
-  }, [])
+    setVoiceStatus('Ouvindo...')
+  }, [stopRec])
 
-  // ── Start Listening ──────────────────────────────────────────────
-  const startListening = useCallback(() => {
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SR) { showToast('Use Chrome para voz.'); return }
-    if (synthRef.current?.speaking) synthRef.current.cancel()
-    if (wakeRef.current) { try { wakeRef.current.stop() } catch {} wakeRef.current = null }
+  function toggleVoice() {
+    if (jarvis) { stopVoice(); return }
+    setTranscript('')
+    setVoiceStatus('Ouvindo...')
+    setJarvis(true)
+    startRec()
+  }
 
-    const rec = new SR()
-    rec.lang = lang === 'en' ? 'en-US' : lang === 'es' ? 'es-ES' : 'pt-BR'
-    rec.continuous = false; rec.interimResults = true
-    rec.onstart  = () => { setJState('listening'); listeningR.current = true }
-    rec.onresult = (e: any) => {
-      const t = Array.from(e.results).map((r: any) => r[0].transcript).join('')
-      setTranscript(t)
-      if (e.results[e.results.length-1].isFinal) { stopListening(); sendToAI(t) }
-    }
-    rec.onerror = (e: any) => {
-      stopListening()
-      if (e.error !== 'no-speech' && e.error !== 'aborted') showToast('Mic: ' + e.error)
-    }
-    rec.onend = () => { if (listeningR.current) stopListening() }
-    recRef.current = rec
-    try { rec.start() } catch { showToast('Erro ao iniciar microfone.') }
-  }, [lang, sendToAI, showToast, stopListening])
-
-  // ── Wake Word ────────────────────────────────────────────────────
-  const restartWake = useCallback(() => {
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SR || listeningR.current) return
-    const rec = new SR()
-    rec.lang = lang === 'en' ? 'en-US' : lang === 'es' ? 'es-ES' : 'pt-BR'
-    rec.continuous = true; rec.interimResults = true
-    rec.onresult = (e: any) => {
-      const t = Array.from(e.results).map((r: any) => r[0].transcript).join('').toLowerCase().trim()
-      if (WAKE_PHRASES.some(p => t.includes(p)) && !listeningR.current && jStateRef.current === 'idle') {
-        try { rec.stop() } catch {} wakeRef.current = null
-        setTimeout(() => startListening(), 400)
-      }
-    }
-    rec.onend   = () => { wakeRef.current = null; if (!listeningR.current) setTimeout(() => restartWake(), 2500) }
-    rec.onerror = () => { wakeRef.current = null; setTimeout(() => restartWake(), 3000) }
-    wakeRef.current = rec
-    try { rec.start() } catch {}
-  }, [lang, startListening])
-
+  // Atalho barra de espaço
   useEffect(() => {
-    const t = setTimeout(() => restartWake(), 1500)
-    return () => {
-      clearTimeout(t)
-      if (wakeRef.current) { try { wakeRef.current.stop() } catch {} }
-      if (recRef.current)  { try { recRef.current.stop()  } catch {} }
-      synthRef.current?.cancel()
-    }
-  }, [])
-
-  // ── Keyboard shortcuts ───────────────────────────────────────────
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName
-      if (e.code === 'Space' && !['INPUT','TEXTAREA','SELECT'].includes(tag)) {
-        e.preventDefault()
-        if (jStateRef.current === 'listening') stopListening()
-        else if (jStateRef.current === 'idle')  startListening()
-      }
-      if (e.code === 'Escape') { stopListening(); synthRef.current?.cancel(); setJState('idle') }
+    function onKey(e: KeyboardEvent) {
+      if (
+        e.code === 'Space' &&
+        e.target instanceof Element &&
+        !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)
+      ) { e.preventDefault(); toggleVoice() }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [startListening, stopListening])
+  }, [jarvis])
 
-  function handleMicBtn() {
-    if (jState === 'speaking')  { synthRef.current?.cancel(); setJState('idle'); return }
-    if (jState === 'listening') { stopListening(); return }
-    if (jState === 'idle')      startListening()
+  function handleKey(e: React.KeyboardEvent) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(input) }
   }
 
-  async function handleSend() {
-    if (!inputText.trim()) return
-    const t = inputText.trim(); setInputText(''); await sendToAI(t)
-  }
-
-  const cfg = STATE_CFG[jState]
-
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <AppShell>
-      <div style={{ flex:1, display:'flex', flexDirection:'column', height:'100%', background:'var(--bg)', overflow:'hidden' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
 
-        {/* Header */}
-        <div style={{ padding:'14px 24px', borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'space-between', flexShrink:0, background:'var(--bg)' }}>
-          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-            <div style={{ width:8, height:8, borderRadius:'50%', background:cfg.color, boxShadow:`0 0 10px ${cfg.glow}`, animation: jState!=='idle'?'pulse 1s infinite':'none' }} />
-            <span style={{ fontFamily:'Syne', fontSize:15, fontWeight:700 }}>Nexus · Modo Jarvis</span>
-            <span style={{ fontSize:11, color:'var(--text3)', background:'var(--bg3)', padding:'2px 8px', borderRadius:99, border:'1px solid var(--border)' }}>🎙️ "Hey Nexus"</span>
-          </div>
-          <div style={{ display:'flex', gap:12, fontSize:11, color:'var(--text3)' }}>
-            <span><kbd style={{ background:'var(--bg3)', border:'1px solid var(--border)', borderRadius:4, padding:'1px 6px' }}>Space</kbd> ativar</span>
-            <span><kbd style={{ background:'var(--bg3)', border:'1px solid var(--border)', borderRadius:4, padding:'1px 6px' }}>Esc</kbd> parar</span>
-            <span style={{ color:cfg.color, fontWeight:600 }}>{cfg.label}</span>
-          </div>
+        {/* Chips */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, padding: '14px 32px 0' }}>
+          {CHIPS.map(({ key, msg }) => (
+            <div
+              key={key}
+              onClick={() => sendMsg(msg[lang] || msg.pt)}
+              style={{
+                background: 'var(--bg2)', border: '1px solid var(--border)',
+                borderRadius: 99, padding: '6px 14px', fontSize: 12,
+                color: 'var(--text2)', cursor: 'pointer', transition: 'all 0.15s',
+              }}
+            >
+              {t(lang, key)}
+            </div>
+          ))}
         </div>
 
-        {/* Messages */}
-        <div style={{ flex:1, overflowY:'auto', padding:'20px 32px', display:'flex', flexDirection:'column', gap:14 }}>
-          {messages.map(msg => (
-            <div key={msg.id} style={{ display:'flex', flexDirection:'column', alignItems: msg.role==='user'?'flex-end':'flex-start', gap:4 }}>
-              {msg.role==='nexus' && (
-                <div style={{ display:'flex', alignItems:'center', gap:6, marginLeft:4 }}>
-                  <div style={{ width:22, height:22, borderRadius:'50%', background:'linear-gradient(135deg,#7c6dfa,#a78bfa)', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
-                    <svg width="11" height="11" viewBox="0 0 72 72" fill="none"><circle cx="36" cy="36" r="8" fill="white"/><line x1="36" y1="28" x2="36" y2="10" stroke="white" strokeWidth="5" strokeLinecap="round"/><line x1="36" y1="44" x2="36" y2="62" stroke="white" strokeWidth="5" strokeLinecap="round"/><line x1="28" y1="36" x2="10" y2="36" stroke="white" strokeWidth="5" strokeLinecap="round"/><line x1="44" y1="36" x2="62" y2="36" stroke="white" strokeWidth="5" strokeLinecap="round"/></svg>
-                  </div>
-                  <span style={{ fontSize:10, color:'var(--accent2)', fontWeight:600, letterSpacing:1 }}>NEXUS</span>
-                  <span style={{ fontSize:10, color:'var(--text3)' }}>{msg.time}</span>
-                </div>
+        {/* Mensagens */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px 32px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {chatHistory.length === 0 && (
+            <div className="msg msg-ai">
+              <div style={{ fontSize: 10, color: 'var(--accent2)', fontWeight: 600, marginBottom: 5, letterSpacing: 0.5 }}>NEXUS IA</div>
+              {t(lang, 'ai_welcome')}
+            </div>
+          )}
+
+          {chatHistory.map((m: any, i: number) => (
+            <div key={i} className={`msg ${m.role === 'user' ? 'msg-user' : 'msg-ai'}`}>
+              {m.role === 'assistant' && (
+                <>
+                  <div style={{ fontSize: 10, color: 'var(--accent2)', fontWeight: 600, marginBottom: 4, letterSpacing: 0.5 }}>NEXUS IA</div>
+                  <IntentBadge type={m.meta?.type} />
+                </>
               )}
-              <div style={{
-                maxWidth:'70%', padding:'12px 18px', fontSize:14, lineHeight:1.65,
-                borderRadius: msg.role==='user' ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
-                background:   msg.role==='user' ? 'linear-gradient(135deg,#7c6dfa,#a78bfa)' : 'var(--bg2)',
-                border:       msg.role==='user' ? 'none' : '1px solid var(--border)',
-                boxShadow:    msg.role==='user' ? '0 4px 20px rgba(124,109,250,0.25)' : 'none',
-                color:'var(--text)',
-              }}>
-                {msg.text}
-              </div>
-              {msg.role==='user' && <span style={{ fontSize:10, color:'var(--text3)', marginRight:4 }}>{msg.time}</span>}
+              <div dangerouslySetInnerHTML={{
+                __html: m.content
+                  .replace(/\n/g, '<br>')
+                  .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
+                  .replace(/\*(.*?)\*/g, '<i>$1</i>')
+              }} />
             </div>
           ))}
 
-          {/* Live transcript */}
-          {transcript && (
-            <div style={{ display:'flex', justifyContent:'flex-end' }}>
-              <div style={{ maxWidth:'70%', padding:'12px 18px', borderRadius:'18px 18px 4px 18px', background:'rgba(124,109,250,0.1)', border:'1px dashed rgba(124,109,250,0.35)', color:'var(--text2)', fontSize:14, fontStyle:'italic' }}>
-                {transcript}...
-              </div>
+          {/* Streaming em tempo real */}
+          {streaming && (
+            <div className="msg msg-ai">
+              <div style={{ fontSize: 10, color: 'var(--accent2)', fontWeight: 600, marginBottom: 5, letterSpacing: 0.5 }}>NEXUS IA</div>
+              <div dangerouslySetInnerHTML={{ __html: streaming.replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
+              <span style={{ opacity: 0.4, animation: 'blink 1s infinite' }}>▊</span>
             </div>
           )}
 
-          {/* Thinking */}
-          {jState==='thinking' && (
-            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-              <div style={{ width:22, height:22, borderRadius:'50%', background:'linear-gradient(135deg,#7c6dfa,#a78bfa)', display:'flex', alignItems:'center', justifyContent:'center' }}>
-                <svg width="11" height="11" viewBox="0 0 72 72" fill="none"><circle cx="36" cy="36" r="8" fill="white"/><line x1="36" y1="28" x2="36" y2="10" stroke="white" strokeWidth="5" strokeLinecap="round"/><line x1="36" y1="44" x2="36" y2="62" stroke="white" strokeWidth="5" strokeLinecap="round"/><line x1="28" y1="36" x2="10" y2="36" stroke="white" strokeWidth="5" strokeLinecap="round"/><line x1="44" y1="36" x2="62" y2="36" stroke="white" strokeWidth="5" strokeLinecap="round"/></svg>
-              </div>
-              <div style={{ padding:'12px 18px', background:'var(--bg2)', borderRadius:'18px 18px 18px 4px', border:'1px solid var(--border)', display:'flex', gap:5, alignItems:'center' }}>
-                {[0,150,300].map((d,i) => <div key={i} style={{ width:6,height:6,borderRadius:'50%',background:'var(--accent2)',animation:`bounce 1.2s ${d}ms infinite` }} />)}
-              </div>
+          {loading && !streaming && (
+            <div className="msg msg-ai" style={{ display: 'flex', gap: 5, alignItems: 'center', padding: '14px 16px' }}>
+              {[0, 0.2, 0.4].map((d, i) => (
+                <div key={i} className="dot-anim animate-bounce-dot" style={{
+                  width: 7, height: 7, borderRadius: '50%',
+                  background: 'var(--text3)', animationDelay: `${d}s`,
+                }} />
+              ))}
             </div>
           )}
-          <div ref={endRef} />
+
+          <div ref={messagesEndRef} />
         </div>
 
-        {/* Bottom controls */}
-        <div style={{ flexShrink:0, padding:'16px 24px 20px', borderTop:'1px solid var(--border)', background:'var(--bg)' }}>
+        {/* Barra de input */}
+        <div style={{
+          padding: '16px 32px', borderTop: '1px solid var(--border)',
+          background: 'var(--bg)', display: 'flex', gap: 10, alignItems: 'flex-end',
+        }}>
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKey}
+            placeholder={t(lang, 'chat_placeholder')}
+            className="input-field"
+            style={{ flex: 1, minHeight: 46, maxHeight: 120, borderColor: 'var(--border2)' }}
+          />
 
-          {/* Wave bars */}
-          <div style={{ height:36, display:'flex', gap:3, alignItems:'center', justifyContent:'center', marginBottom:14, opacity: jState!=='idle'?1:0, transition:'opacity 0.3s' }}>
-            {Array.from({length:24}).map((_,i) => (
-              <div key={i} style={{ width:3, borderRadius:99, background:cfg.color, boxShadow:`0 0 4px ${cfg.glow}`, animation:`wave ${0.35+Math.sin(i)*0.2}s ${i*0.04}s ease-in-out infinite` }} />
-            ))}
-          </div>
+          {/* Botão voz */}
+          <button
+            onClick={toggleVoice}
+            title="Modo Jarvis — Espaço para falar"
+            style={{
+              width: 46, height: 46,
+              background: jarvis ? 'rgba(124,109,250,0.15)' : 'var(--bg2)',
+              border: `1px solid ${jarvis ? 'var(--accent)' : 'var(--border2)'}`,
+              borderRadius: 'var(--radius-sm)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', color: jarvis ? 'var(--accent)' : 'var(--text2)',
+              flexShrink: 0,
+              animation: jarvis ? 'micPulse 1s ease-in-out infinite' : 'none',
+              transition: 'all 0.2s',
+            }}
+          >
+            <svg width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+          </button>
 
-          {/* Input row */}
-          <div style={{ display:'flex', gap:10, alignItems:'flex-end' }}>
-            <textarea
-              rows={1}
-              value={inputText}
-              onChange={e => setInputText(e.target.value)}
-              onKeyDown={e => { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend()} }}
-              placeholder="Ou digita aqui... (Enter para enviar)"
-              style={{ flex:1, background:'var(--bg2)', border:'1px solid var(--border2)', borderRadius:14, padding:'12px 16px', color:'var(--text)', fontSize:14, outline:'none', resize:'none', minHeight:46, maxHeight:100, fontFamily:'DM Sans' }}
-            />
+          {/* Botão enviar */}
+          <button
+            onClick={() => sendMsg(input)}
+            disabled={loading || !input.trim()}
+            className="send-btn"
+            style={{ width: 46, height: 46 }}
+          >
+            <svg width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="#fff" strokeWidth="2.5">
+              <path d="M5 12h14M12 5l7 7-7 7" />
+            </svg>
+          </button>
+        </div>
 
-            {/* Big mic button */}
-            <button onClick={handleMicBtn} title={jState==='idle'?'Ativar Nexus':'Parar'} style={{
-              width:58, height:58, borderRadius:'50%', border:'none', cursor:'pointer', flexShrink:0,
-              background:`radial-gradient(circle at 35% 35%, ${cfg.color}, ${cfg.color}99)`,
-              boxShadow: jState!=='idle' ? `0 0 0 8px ${cfg.glow}, 0 0 32px ${cfg.glow}` : `0 4px 20px ${cfg.glow}`,
-              display:'flex', alignItems:'center', justifyContent:'center',
-              transition:'all 0.3s ease',
-              animation: jState==='listening' ? 'micPulse 1.2s ease-in-out infinite' : 'none',
-            }}>
-              {jState==='speaking' ? (
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
-              ) : jState==='thinking' ? (
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-              ) : (
-                <svg width="22" height="22" fill="none" viewBox="0 0 24 24" stroke="white" strokeWidth="2">
-                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                  <line x1="12" y1="19" x2="12" y2="23"/>
-                  <line x1="8" y1="23" x2="16" y2="23"/>
-                </svg>
-              )}
-            </button>
-
-            <button onClick={handleSend} disabled={!inputText.trim()} style={{ width:46, height:46, borderRadius:12, background:inputText.trim()?'var(--accent)':'var(--bg3)', border:'1px solid var(--border)', cursor:inputText.trim()?'pointer':'not-allowed', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, opacity:inputText.trim()?1:0.4, transition:'all 0.2s' }}>
-              <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="white" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-            </button>
-          </div>
-
-          {/* Quick commands */}
-          <div style={{ display:'flex', gap:8, marginTop:10, flexWrap:'wrap' }}>
-            {[
-              ['📅 Agenda hoje',       'O que tenho na agenda hoje?'],
-              ['➕ Novo evento',        'Quero criar um novo evento'],
-              ['💬 Avisar equipe',      'Manda uma mensagem no WhatsApp pra equipe'],
-              ['⚡ Produtividade',     'Como posso ser mais produtivo hoje?'],
-              ['🧠 Resumo da semana',  'Me dá um resumo do que tenho essa semana'],
-              ['💰 Finanças',          'Me ajuda a organizar minhas finanças'],
-            ].map(([label, msg]) => (
-              <button key={label} onClick={() => sendToAI(msg)} style={{ background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:99, padding:'5px 12px', fontSize:11, color:'var(--text2)', cursor:'pointer', fontFamily:'DM Sans', transition:'all 0.15s' }}
-                onMouseEnter={e=>{(e.currentTarget.style.borderColor='var(--accent)');(e.currentTarget.style.color='var(--accent2)')}}
-                onMouseLeave={e=>{(e.currentTarget.style.borderColor='var(--border)');(e.currentTarget.style.color='var(--text2)')}}>
-                {label}
-              </button>
-            ))}
-          </div>
+        <div style={{ textAlign: 'center', padding: 6, fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>
+          {ttsEnabled ? 'Voz: Azure Neural · ' : ''}
+          Powered by OpenRouter · Gemini · GPT-4 · Espaço = voz
         </div>
       </div>
 
-      <style>{`
-        @keyframes bounce   { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
-        @keyframes pulse    { 0%,100%{opacity:1} 50%{opacity:0.4} }
-        @keyframes wave     { 0%,100%{height:6px} 50%{height:28px} }
-        @keyframes micPulse {
-          0%,100%{box-shadow:0 0 0 0 rgba(248,113,113,0.5),0 4px 20px rgba(248,113,113,0.4)}
-          50%{box-shadow:0 0 0 14px rgba(248,113,113,0),0 4px 20px rgba(248,113,113,0.4)}
-        }
-      `}</style>
+      <JarvisOverlay
+        visible={jarvis}
+        status={voiceStatus}
+        transcript={transcript}
+        onStop={stopVoice}
+      />
     </AppShell>
   )
 }

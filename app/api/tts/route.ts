@@ -1,60 +1,55 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-export const runtime = 'nodejs'
+export const runtime = 'edge'
 
 export async function POST(req: NextRequest) {
+  const { text } = await req.json()
+  if (!text) return NextResponse.json({ error: 'no text' }, { status: 400 })
+
+  const key = process.env.AZURE_TTS_KEY
+  const region = process.env.AZURE_TTS_REGION || 'brazilsouth'
+
+  if (!key) return NextResponse.json({ error: 'no key' }, { status: 503 })
+
+  // Limpa markdown e caracteres especiais
+  const clean = text.replace(/[*_`#>\[\]]/g, '').replace(/\n+/g, ' ').trim().slice(0, 800)
+  const escaped = clean.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] ?? c))
+
+  const ssml = `<speak version='1.0' xml:lang='pt-BR'>
+    <voice name='pt-BR-JulioNeural'>
+      <prosody rate='+6%' pitch='-0.3st' style='assistant'>${escaped}</prosody>
+    </voice>
+  </speak>`
+
   try {
-    const { text } = await req.json()
-    if (!text) return NextResponse.json({ error: 'Missing text' }, { status: 400 })
+    // Token de acesso
+    const tokenRes = await fetch(
+      `https://${region}.api.cognitive.microsoft.com/sts/v1.0/issueToken`,
+      { method: 'POST', headers: { 'Ocp-Apim-Subscription-Key': key } }
+    )
+    if (!tokenRes.ok) throw new Error('token failed')
+    const token = await tokenRes.text()
 
-    const apiKey   = process.env.ELEVENLABS_API_KEY
-    const voiceId  = process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL'
-
-    if (!apiKey) return NextResponse.json({ error: 'ElevenLabs not configured' }, { status: 500 })
-
-    // Clean text for TTS
-    const clean = text
-      .replace(/\*\*(.*?)\*\*/g, '$1')
-      .replace(/\*(.*?)\*/g, '$1')
-      .replace(/#{1,6}\s/g, '')
-      .replace(/[⚡🤖📅💬⏰☀️📊🔥💡🎉🛡️⭐🚀💳🧠⚙️✅❌📋🗓]/g, '')
-      .substring(0, 400)
-
-    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-      method: 'POST',
-      headers: {
-        'xi-api-key': apiKey,
-        'Content-Type': 'application/json',
-        'Accept': 'audio/mpeg',
-      },
-      body: JSON.stringify({
-        text: clean,
-        model_id: 'eleven_multilingual_v2',
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.85,
-          style: 0.2,
-          use_speaker_boost: true,
+    // Síntese
+    const ttsRes = await fetch(
+      `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/ssml+xml',
+          'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3',
         },
-      }),
-    })
+        body: ssml,
+      }
+    )
+    if (!ttsRes.ok) throw new Error(`tts ${ttsRes.status}`)
 
-    if (!res.ok) {
-      const err = await res.text()
-      console.error('ElevenLabs error:', err)
-      return NextResponse.json({ error: 'TTS failed' }, { status: 500 })
-    }
-
-    const audioBuffer = await res.arrayBuffer()
-    return new NextResponse(audioBuffer, {
-      headers: {
-        'Content-Type': 'audio/mpeg',
-        'Content-Length': audioBuffer.byteLength.toString(),
-        'Cache-Control': 'no-cache',
-      },
-    })
+    const buffer = await ttsRes.arrayBuffer()
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    return NextResponse.json({ audioBase64: b64 })
   } catch (err) {
-    console.error('TTS error:', err)
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    console.error('[TTS]', err)
+    return NextResponse.json({ error: 'tts_failed' }, { status: 500 })
   }
 }
