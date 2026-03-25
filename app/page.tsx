@@ -1,344 +1,351 @@
 'use client'
-import React, { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useStore } from '@/lib/store'
-import { t, type TKey } from '@/lib/translations'
+import { t } from '@/lib/translations'
 import { AppShell } from '@/components/AppShell'
-import { JarvisOverlay, speakText, useSpeechRecognition } from '@/components/JarvisOverlay'
+import { EventModal } from '@/components/EventModal'
+import Link from 'next/link'
+import type { CalendarEvent } from '@/lib/types'
 
-// ── Tipos ─────────────────────────────────────────────────────────────────────
-type Intent = 'chat' | 'note' | 'habit' | 'finance' | 'event'
-
-interface ApiResponse {
-  reply: string
-  type?: Intent
-  data?: Record<string, unknown>
-  audioBase64?: string
-  text?: string           // SSE chunk
-}
-
-// ── Chips de sugestão ─────────────────────────────────────────────────────────
-type ChipLang = { pt: string; en: string; es: string }
-const CHIPS: { key: TKey; msg: ChipLang }[] = [
-  { key: 'chip_today',      msg: { pt: 'O que tenho na agenda hoje?',           en: "What's on my calendar today?",  es: '¿Qué tengo hoy?' } },
-  { key: 'chip_meeting',    msg: { pt: 'Marcar reunião com equipe sexta às 15h', en: 'Schedule team meeting Friday 3pm', es: 'Reunión equipo viernes 15h' } },
-  { key: 'chip_productivity',msg:{ pt: 'Dicas para ser mais produtivo hoje',     en: 'Tips to be more productive today', es: 'Consejos productividad hoy' } },
-  { key: 'chip_upcoming',   msg: { pt: 'Meus próximos 5 eventos',                en: 'My next 5 events',               es: 'Mis próximos 5 eventos' } },
-  { key: 'chip_habit',      msg: { pt: 'Quero criar hábito de meditar 10min',   en: 'Create habit: meditate 10min',   es: 'Hábito: meditar 10min' } },
-  { key: 'chip_finance',    msg: { pt: 'Gastei R$45 no almoço hoje',             en: 'I spent $45 on lunch today',     es: 'Gasté $45 en almuerzo hoy' } },
-]
-
-// ── Ícone de intent ───────────────────────────────────────────────────────────
-function IntentBadge({ type }: { type?: Intent }) {
-  const map: Record<string, string> = { note: '📝', habit: '🎯', finance: '💸', event: '📅', chat: '' }
-  const label: Record<string, string> = { note: 'Nota', habit: 'Hábito', finance: 'Finança', event: 'Evento', chat: '' }
-  if (!type || type === 'chat') return null
+// ── Mini componentes ──────────────────────────────────────────────────────────
+function StatCard({ val, label, color = 'var(--accent2)', sub }: { val: string | number; label: string; color?: string; sub?: string }) {
   return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 4,
-      fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
-      color: 'var(--accent2)', background: 'rgba(124,109,250,0.1)',
-      border: '1px solid rgba(124,109,250,0.2)',
-      borderRadius: 99, padding: '2px 8px', marginBottom: 6,
+    <div style={{
+      background: 'var(--bg2)', border: '1px solid var(--border)',
+      borderRadius: 'var(--radius)', padding: '18px 20px',
     }}>
-      {map[type]} {label[type].toUpperCase()}
-    </span>
+      <div style={{ fontFamily: 'Syne', fontSize: 30, fontWeight: 800, color }}>{val}</div>
+      <div style={{ fontSize: 12, color: 'var(--text2)', marginTop: 3 }}>{label}</div>
+      {sub && <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 2 }}>{sub}</div>}
+    </div>
   )
 }
 
-// ── Componente principal ──────────────────────────────────────────────────────
-export default function AgentPage() {
-  const {
-    lang, accessToken, userProfile, geminiKey,
-    calendarEvents, addMessage, chatHistory, showToast,
-  } = useStore(s => ({
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      fontSize: 11, fontWeight: 700, letterSpacing: 1.2,
+      color: 'var(--text3)', textTransform: 'uppercase', margin: '20px 0 10px',
+    }}>
+      {children}
+    </div>
+  )
+}
+
+function HabitRow({ name, done, streak }: { name: string; done: boolean; streak: number }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 12,
+      padding: '11px 0', borderBottom: '1px solid var(--border)',
+    }}>
+      <div style={{
+        width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
+        background: done ? 'var(--green)' : 'transparent',
+        border: done ? 'none' : '2px solid var(--border2)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 13, cursor: 'pointer',
+      }}>
+        {done ? '✓' : ''}
+      </div>
+      <div style={{ flex: 1, fontSize: 14, color: done ? 'var(--text2)' : 'var(--text)', textDecoration: done ? 'line-through' : 'none' }}>
+        {name}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--amber)', fontWeight: 600 }}>🔥 {streak}d</div>
+    </div>
+  )
+}
+
+function TaskRow({ title, priority, due }: { title: string; priority: 'alta' | 'media' | 'baixa'; due?: string }) {
+  const colors = { alta: 'var(--red)', media: 'var(--amber)', baixa: 'var(--green)' }
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '11px 0', borderBottom: '1px solid var(--border)',
+    }}>
+      <div style={{
+        width: 8, height: 8, borderRadius: '50%',
+        background: colors[priority], flexShrink: 0,
+      }} />
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 13, fontWeight: 500 }}>{title}</div>
+        {due && <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 2 }}>{due}</div>}
+      </div>
+      <div style={{
+        fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+        color: colors[priority], background: `${colors[priority]}18`,
+        border: `1px solid ${colors[priority]}30`,
+        borderRadius: 99, padding: '2px 8px', textTransform: 'uppercase',
+      }}>
+        {priority}
+      </div>
+    </div>
+  )
+}
+
+function FinanceRow({ desc, value, type, category }: { desc: string; value: number; type: 'gasto' | 'receita'; category: string }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '11px 0', borderBottom: '1px solid var(--border)',
+    }}>
+      <div style={{ fontSize: 20 }}>
+        {{ alimentação: '🍔', transporte: '🚗', saúde: '💊', lazer: '🎬', outro: '📦', receita: '💰' }[category] || '💸'}
+      </div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 13, fontWeight: 500 }}>{desc}</div>
+        <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 2 }}>{category}</div>
+      </div>
+      <div style={{
+        fontSize: 14, fontWeight: 700,
+        color: type === 'receita' ? 'var(--green)' : 'var(--red)',
+      }}>
+        {type === 'receita' ? '+' : '-'}R$ {value.toFixed(2)}
+      </div>
+    </div>
+  )
+}
+
+// ── Dados demo (seriam vindos do store/supabase) ───────────────────────────────
+const DEMO_HABITS = [
+  { name: 'Meditar 10 min', done: true, streak: 12 },
+  { name: 'Academia', done: false, streak: 7 },
+  { name: 'Ler 20 páginas', done: true, streak: 3 },
+  { name: 'Beber 2L de água', done: false, streak: 21 },
+]
+const DEMO_TASKS = [
+  { title: 'Enviar proposta ao cliente', priority: 'alta' as const, due: 'Hoje, 18h' },
+  { title: 'Revisar relatório mensal', priority: 'alta' as const, due: 'Amanhã, 12h' },
+  { title: 'Atualizar LinkedIn', priority: 'media' as const, due: 'Esta semana' },
+  { title: 'Comprar presente aniversário', priority: 'baixa' as const, due: 'Em 5 dias' },
+]
+const DEMO_FINANCES = [
+  { desc: 'Almoço', value: 42.5, type: 'gasto' as const, category: 'alimentação' },
+  { desc: 'Uber', value: 18.9, type: 'gasto' as const, category: 'transporte' },
+  { desc: 'Freelance design', value: 850, type: 'receita' as const, category: 'receita' },
+  { desc: 'Netflix', value: 39.9, type: 'gasto' as const, category: 'lazer' },
+]
+
+// ── Página principal ──────────────────────────────────────────────────────────
+export default function HomePage() {
+  const { lang, accessToken, userProfile, calendarEvents, setCalendarEvents, showToast } = useStore(s => ({
     lang: s.lang, accessToken: s.accessToken, userProfile: s.userProfile,
-    geminiKey: s.geminiKey, calendarEvents: s.calendarEvents,
-    addMessage: s.addMessage, chatHistory: s.chatHistory, showToast: s.showToast,
+    calendarEvents: s.calendarEvents, setCalendarEvents: s.setCalendarEvents, showToast: s.showToast,
   }))
+  const [todayEvents, setTodayEvents] = useState<CalendarEvent[]>([])
+  const [upcomingEvents, setUpcomingEvents] = useState<CalendarEvent[]>([])
+  const [loadingCal, setLoadingCal] = useState(false)
+  const [showModal, setShowModal] = useState(false)
 
-  const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [streaming, setStreaming] = useState('')       // texto sendo streamado
-  const [jarvis, setJarvis] = useState(false)
-  const [voiceStatus, setVoiceStatus] = useState('Ouvindo...')
-  const [transcript, setTranscript] = useState('')
-  const [ttsEnabled] = useState(() => !!process.env.NEXT_PUBLIC_AZURE_TTS_ENABLED)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const speakingRef = useRef(false)
-
-  const calendarContext = calendarEvents.slice(0, 5)
-    .map(ev => `${ev.summary} (${ev.start.dateTime || ev.start.date})`).join(', ')
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chatHistory, loading, streaming])
-
-  // ── Enviar mensagem ─────────────────────────────────────────────────────────
-  const sendMsg = useCallback(async (text: string, fromVoice = false) => {
-    if (!text.trim()) return
-    setInput('')
-    addMessage({ role: 'user', content: text })
-    setLoading(true)
-    setStreaming('')
-
+  async function loadCalendar() {
+    if (!accessToken) return
+    setLoadingCal(true)
     try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [...chatHistory, { role: 'user', content: text }],
-          userName: userProfile?.given_name,
-          lang, calendarContext, geminiKey, accessToken,
-          voiceMode: fromVoice,
-          ttsEnabled: fromVoice && ttsEnabled,
-        }),
-      })
+      const [r1, r2] = await Promise.all([
+        fetch('/api/calendar?type=today', { headers: { Authorization: `Bearer ${accessToken}` } }),
+        fetch('/api/calendar?type=upcoming', { headers: { Authorization: `Bearer ${accessToken}` } }),
+      ])
+      const [d1, d2] = await Promise.all([r1.json(), r2.json()])
+      setTodayEvents(d1.items || [])
+      setUpcomingEvents(d2.items || [])
+      setCalendarEvents([...(d1.items || []), ...(d2.items || [])])
+    } catch { showToast(t(lang, 'err_connect')) }
+    setLoadingCal(false)
+  }
 
-      // Streaming SSE
-      const contentType = res.headers.get('content-type') || ''
-      if (contentType.includes('text/event-stream')) {
-        const reader = res.body!.getReader()
-        const decoder = new TextDecoder()
-        let full = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          const chunk = decoder.decode(value)
-          for (const line of chunk.split('\n')) {
-            if (line.startsWith('data: ')) {
-              try {
-                const { text: t } = JSON.parse(line.slice(6))
-                if (t) { full += t; setStreaming(full) }
-              } catch {}
-            }
-          }
-        }
-        addMessage({ role: 'assistant', content: full })
-        setStreaming('')
-        if (fromVoice && !speakingRef.current) {
-          speakingRef.current = true
-          await speakText(full, ttsEnabled)
-          speakingRef.current = false
-        }
-      } else {
-        // JSON normal
-        const data: ApiResponse = await res.json()
-        if (data.reply) {
-          addMessage({ role: 'assistant', content: data.reply, meta: { type: data.type, data: data.data } as any })
-          if (fromVoice) {
-            if (data.audioBase64 && !speakingRef.current) {
-              // TTS já veio pronto da API
-              speakingRef.current = true
-              const binary = atob(data.audioBase64)
-              const bytes = new Uint8Array(binary.length)
-              for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-              const blob = new Blob([bytes], { type: 'audio/mp3' })
-              const url = URL.createObjectURL(blob)
-              const audio = new Audio(url)
-              audio.onended = () => { URL.revokeObjectURL(url); speakingRef.current = false }
-              audio.play().catch(() => { speakingRef.current = false })
-            } else if (!speakingRef.current) {
-              speakingRef.current = true
-              await speakText(data.reply, ttsEnabled)
-              speakingRef.current = false
-            }
-          }
-        } else {
-          showToast(t(lang, 'err_connect'))
-        }
-      }
-    } catch {
-      showToast(t(lang, 'err_connect'))
-    }
-    setLoading(false)
-  }, [chatHistory, lang, calendarContext, geminiKey, accessToken, ttsEnabled, userProfile, addMessage, showToast])
+  useEffect(() => { if (accessToken) loadCalendar() }, [accessToken])
 
-  // ── STT ─────────────────────────────────────────────────────────────────────
-  const { start: startRec, stop: stopRec } = useSpeechRecognition({
-    lang,
-    onFinal: useCallback((text: string) => {
-      setTranscript(text)
-      setVoiceStatus('Processando...')
-      setJarvis(false)
-      stopRec()
-      sendMsg(text, true)
-    }, [sendMsg, stopRec]),
-    onInterim: useCallback((t: string) => setTranscript(t), []),
-    onError: useCallback((err: string) => {
-      if (err === 'not_supported') showToast('Microfone não suportado neste navegador')
-      setJarvis(false)
-    }, [showToast]),
+  // Stats calculados
+  const now = new Date()
+  const todayStr = now.toDateString()
+  const todayEvs = calendarEvents.filter(ev => ev.start.dateTime && new Date(ev.start.dateTime).toDateString() === todayStr)
+  const weekEvs = calendarEvents.filter(ev => {
+    if (!ev.start.dateTime) return false
+    const d = new Date(ev.start.dateTime)
+    return d >= now && d <= new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
   })
+  let busyMins = 0
+  todayEvs.forEach(ev => {
+    if (ev.start.dateTime && ev.end?.dateTime)
+      busyMins += (new Date(ev.end.dateTime).getTime() - new Date(ev.start.dateTime).getTime()) / 60000
+  })
+  const busyHrs = Math.round(busyMins / 60 * 10) / 10
+  const habitsToday = DEMO_HABITS.filter(h => h.done).length
+  const totalReceitas = DEMO_FINANCES.filter(f => f.type === 'receita').reduce((s, f) => s + f.value, 0)
+  const totalGastos = DEMO_FINANCES.filter(f => f.type === 'gasto').reduce((s, f) => s + f.value, 0)
+  const hora = now.getHours()
+  const saudacao = hora < 12 ? 'Bom dia' : hora < 18 ? 'Boa tarde' : 'Boa noite'
 
-  const stopVoice = useCallback(() => {
-    setJarvis(false)
-    stopRec()
-    setTranscript('')
-    setVoiceStatus('Ouvindo...')
-  }, [stopRec])
-
-  function toggleVoice() {
-    if (jarvis) { stopVoice(); return }
-    setTranscript('')
-    setVoiceStatus('Ouvindo...')
-    setJarvis(true)
-    startRec()
-  }
-
-  // Atalho barra de espaço
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (
-        e.code === 'Space' &&
-        e.target instanceof Element &&
-        !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)
-      ) { e.preventDefault(); toggleVoice() }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [jarvis])
-
-  function handleKey(e: React.KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(input) }
-  }
-
-  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <AppShell>
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px 40px' }}>
 
-        {/* Chips */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, padding: '14px 32px 0' }}>
-          {CHIPS.map(({ key, msg }) => (
-            <div
-              key={key}
-              onClick={() => sendMsg(msg[lang] || msg.pt)}
-              style={{
-                background: 'var(--bg2)', border: '1px solid var(--border)',
-                borderRadius: 99, padding: '6px 14px', fontSize: 12,
-                color: 'var(--text2)', cursor: 'pointer', transition: 'all 0.15s',
-              }}
-            >
-              {t(lang, key)}
-            </div>
-          ))}
+        {/* Header saudação */}
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontFamily: 'Syne', fontSize: 22, fontWeight: 800 }}>
+            {saudacao}, {userProfile?.given_name || 'usuário'} 👋
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--text2)', marginTop: 4 }}>
+            {now.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}
+            {todayEvs.length > 0 ? ` · ${todayEvs.length} evento${todayEvs.length > 1 ? 's' : ''} hoje` : ' · Agenda livre hoje'}
+          </div>
         </div>
 
-        {/* Mensagens */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '20px 32px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {chatHistory.length === 0 && (
-            <div className="msg msg-ai">
-              <div style={{ fontSize: 10, color: 'var(--accent2)', fontWeight: 600, marginBottom: 5, letterSpacing: 0.5 }}>NEXUS IA</div>
-              {t(lang, 'ai_welcome')}
-            </div>
-          )}
-
-          {chatHistory.map((m: any, i: number) => (
-            <div key={i} className={`msg ${m.role === 'user' ? 'msg-user' : 'msg-ai'}`}>
-              {m.role === 'assistant' && (
-                <>
-                  <div style={{ fontSize: 10, color: 'var(--accent2)', fontWeight: 600, marginBottom: 4, letterSpacing: 0.5 }}>NEXUS IA</div>
-                  <IntentBadge type={m.meta?.type} />
-                </>
-              )}
-              <div dangerouslySetInnerHTML={{
-                __html: m.content
-                  .replace(/\n/g, '<br>')
-                  .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
-                  .replace(/\*(.*?)\*/g, '<i>$1</i>')
-              }} />
-            </div>
-          ))}
-
-          {/* Streaming em tempo real */}
-          {streaming && (
-            <div className="msg msg-ai">
-              <div style={{ fontSize: 10, color: 'var(--accent2)', fontWeight: 600, marginBottom: 5, letterSpacing: 0.5 }}>NEXUS IA</div>
-              <div dangerouslySetInnerHTML={{ __html: streaming.replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') }} />
-              <span style={{ opacity: 0.4, animation: 'blink 1s infinite' }}>▊</span>
-            </div>
-          )}
-
-          {loading && !streaming && (
-            <div className="msg msg-ai" style={{ display: 'flex', gap: 5, alignItems: 'center', padding: '14px 16px' }}>
-              {[0, 0.2, 0.4].map((d, i) => (
-                <div key={i} className="dot-anim animate-bounce-dot" style={{
-                  width: 7, height: 7, borderRadius: '50%',
-                  background: 'var(--text3)', animationDelay: `${d}s`,
-                }} />
-              ))}
-            </div>
-          )}
-
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Barra de input */}
-        <div style={{
-          padding: '16px 32px', borderTop: '1px solid var(--border)',
-          background: 'var(--bg)', display: 'flex', gap: 10, alignItems: 'flex-end',
+        {/* CTA Nexus */}
+        <Link href="/agent" style={{
+          display: 'flex', alignItems: 'center', gap: 16,
+          background: 'linear-gradient(135deg,rgba(124,109,250,0.18),rgba(124,109,250,0.06))',
+          border: '1px solid rgba(124,109,250,0.35)',
+          borderRadius: 'var(--radius)', padding: '16px 20px',
+          marginBottom: 24, cursor: 'pointer', textDecoration: 'none',
+          transition: 'border-color 0.2s',
         }}>
-          <textarea
-            ref={textareaRef}
-            rows={1}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKey}
-            placeholder={t(lang, 'chat_placeholder')}
-            className="input-field"
-            style={{ flex: 1, minHeight: 46, maxHeight: 120, borderColor: 'var(--border2)' }}
-          />
-
-          {/* Botão voz */}
-          <button
-            onClick={toggleVoice}
-            title="Modo Jarvis — Espaço para falar"
-            style={{
-              width: 46, height: 46,
-              background: jarvis ? 'rgba(124,109,250,0.15)' : 'var(--bg2)',
-              border: `1px solid ${jarvis ? 'var(--accent)' : 'var(--border2)'}`,
-              borderRadius: 'var(--radius-sm)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: jarvis ? 'var(--accent)' : 'var(--text2)',
-              flexShrink: 0,
-              animation: jarvis ? 'micPulse 1s ease-in-out infinite' : 'none',
-              transition: 'all 0.2s',
-            }}
-          >
-            <svg width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+          <div style={{
+            width: 46, height: 46, borderRadius: '50%',
+            background: 'linear-gradient(135deg,#7c6dfa,#a78bfa)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0, boxShadow: '0 0 20px rgba(124,109,250,0.4)',
+          }}>
+            <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="#fff" strokeWidth="2">
               <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
               <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
               <line x1="12" y1="19" x2="12" y2="23" />
               <line x1="8" y1="23" x2="16" y2="23" />
             </svg>
-          </button>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: 'Syne', fontSize: 15, fontWeight: 700, color: 'var(--accent2)' }}>
+              ⚡ Falar com o Nexus
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 3 }}>
+              Diga algo · Ele organiza tudo automaticamente
+            </div>
+          </div>
+          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="var(--accent2)" strokeWidth="2.5">
+            <path d="M5 12h14M12 5l7 7-7 7" />
+          </svg>
+        </Link>
 
-          {/* Botão enviar */}
-          <button
-            onClick={() => sendMsg(input)}
-            disabled={loading || !input.trim()}
-            className="send-btn"
-            style={{ width: 46, height: 46 }}
-          >
-            <svg width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="#fff" strokeWidth="2.5">
-              <path d="M5 12h14M12 5l7 7-7 7" />
-            </svg>
-          </button>
+        {/* Stats row */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 24 }}>
+          <StatCard val={todayEvs.length} label="eventos hoje" color="var(--accent2)" sub={`${weekEvs.length} esta semana`} />
+          <StatCard val={`${habitsToday}/${DEMO_HABITS.length}`} label="hábitos hoje" color="var(--green)" sub="streak médio: 11d" />
+          <StatCard val={`R$${totalGastos.toFixed(0)}`} label="gastos hoje" color="var(--red)" sub={`receitas: R$${totalReceitas.toFixed(0)}`} />
+          <StatCard val={DEMO_TASKS.filter(t => t.priority === 'alta').length} label="tarefas urgentes" color="var(--amber)" sub={`${DEMO_TASKS.length} total`} />
         </div>
 
-        <div style={{ textAlign: 'center', padding: 6, fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>
-          {ttsEnabled ? 'Voz: Azure Neural · ' : ''}
-          Powered by OpenRouter · Gemini · GPT-4 · Espaço = voz
+        {/* Quick actions */}
+        <SectionTitle>Ações rápidas</SectionTitle>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 24 }}>
+          {[
+            { icon: '📅', label: 'Novo evento', sub: 'Google Calendar', action: () => setShowModal(true) },
+            { icon: loadingCal ? '⏳' : '🔄', label: 'Sincronizar', sub: 'Atualizar agenda', action: loadCalendar },
+            { icon: '💬', label: 'WhatsApp', sub: 'Z-API · Mensagens', href: '/whatsapp' },
+            { icon: '⚙️', label: 'Automações', sub: 'Se X → Faça Y', href: '/automations' },
+          ].map(({ icon, label, sub, action, href }) => {
+            const style: React.CSSProperties = {
+              background: 'var(--bg2)', border: '1px solid var(--border)',
+              borderRadius: 'var(--radius)', padding: '16px 18px',
+              cursor: 'pointer', display: 'flex', flexDirection: 'column',
+              gap: 6, textDecoration: 'none', transition: 'border-color 0.2s',
+            }
+            return href ? (
+              <Link key={label} href={href} style={style}>
+                <div style={{ fontSize: 22 }}>{icon}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{label}</div>
+                <div style={{ fontSize: 11, color: 'var(--text3)' }}>{sub}</div>
+              </Link>
+            ) : (
+              <div key={label} onClick={action} style={style}>
+                <div style={{ fontSize: 22 }}>{icon}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{label}</div>
+                <div style={{ fontSize: 11, color: 'var(--text3)' }}>{sub}</div>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Grid 3 colunas */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 20 }}>
+
+          {/* Tarefas */}
+          <div>
+            <SectionTitle>📝 Tarefas prioritárias</SectionTitle>
+            <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '4px 16px 4px' }}>
+              {DEMO_TASKS.map((task, i) => <TaskRow key={i} {...task} />)}
+              <Link href="/agent" style={{ display: 'block', textAlign: 'center', padding: '12px 0', fontSize: 12, color: 'var(--accent2)', textDecoration: 'none' }}>
+                + Nova tarefa via IA
+              </Link>
+            </div>
+          </div>
+
+          {/* Hábitos */}
+          <div>
+            <SectionTitle>🎯 Hábitos de hoje</SectionTitle>
+            <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '4px 16px 4px' }}>
+              {DEMO_HABITS.map((h, i) => <HabitRow key={i} {...h} />)}
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '12px 0', fontSize: 12, color: 'var(--text3)',
+              }}>
+                <span>{habitsToday}/{DEMO_HABITS.length} concluídos</span>
+                <div style={{
+                  height: 4, background: 'var(--bg3)', borderRadius: 99, flex: 1,
+                  margin: '0 10px', overflow: 'hidden',
+                }}>
+                  <div style={{
+                    height: '100%', background: 'var(--green)', borderRadius: 99,
+                    width: `${(habitsToday / DEMO_HABITS.length) * 100}%`,
+                    transition: 'width 0.5s ease',
+                  }} />
+                </div>
+                <span style={{ color: 'var(--green)', fontWeight: 600 }}>
+                  {Math.round((habitsToday / DEMO_HABITS.length) * 100)}%
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Finanças + Calendário */}
+          <div>
+            <SectionTitle>💸 Últimas transações</SectionTitle>
+            <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '4px 16px 4px', marginBottom: 16 }}>
+              {DEMO_FINANCES.map((f, i) => <FinanceRow key={i} {...f} />)}
+              <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '12px 0', fontSize: 12,
+              }}>
+                <span style={{ color: 'var(--green)' }}>+R$ {totalReceitas.toFixed(2)}</span>
+                <span style={{ color: 'var(--text3)' }}>Saldo do dia</span>
+                <span style={{ color: totalReceitas - totalGastos >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
+                  {totalReceitas - totalGastos >= 0 ? '+' : ''}R$ {(totalReceitas - totalGastos).toFixed(2)}
+                </span>
+              </div>
+            </div>
+
+            <SectionTitle>📅 Próximos eventos</SectionTitle>
+            <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '8px 16px' }}>
+              {upcomingEvents.slice(0, 3).length > 0
+                ? upcomingEvents.slice(0, 3).map((ev, i) => (
+                  <div key={i} style={{ padding: '10px 0', borderBottom: i < 2 ? '1px solid var(--border)' : 'none' }}>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{ev.summary}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 2 }}>
+                      {ev.start.dateTime
+                        ? new Date(ev.start.dateTime).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+                        : ev.start.date}
+                    </div>
+                  </div>
+                ))
+                : (
+                  <div style={{ padding: '16px 0', textAlign: 'center', fontSize: 13, color: 'var(--text3)' }}>
+                    {accessToken ? 'Nenhum evento próximo' : 'Faça login para ver sua agenda'}
+                  </div>
+                )}
+            </div>
+          </div>
         </div>
       </div>
 
-      <JarvisOverlay
-        visible={jarvis}
-        status={voiceStatus}
-        transcript={transcript}
-        onStop={stopVoice}
-      />
+      {showModal && <EventModal onClose={() => setShowModal(false)} onCreated={loadCalendar} />}
     </AppShell>
   )
 }
